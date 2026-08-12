@@ -12,6 +12,8 @@ export type ScrollDirection = 'up' | 'down' | 'left' | 'right'
 
 export type ScreenshotFormat = 'webp' | 'jpeg'
 
+export type ClientColorScheme = 'light' | 'dark'
+
 export interface RequestOptions {
   signal?: AbortSignal
   timeoutMs?: number
@@ -102,6 +104,32 @@ export interface SetViewportRequest {
   width: number
   height: number
   deviceScaleFactor: number
+}
+
+export interface UserAgentBrandVersion {
+  brand: string
+  version: string
+}
+
+/** Chrome DevTools Protocol user-agent client hint metadata. */
+export interface UserAgentMetadata {
+  brands?: UserAgentBrandVersion[]
+  fullVersionList?: UserAgentBrandVersion[]
+  platform: string
+  platformVersion: string
+  architecture: string
+  model: string
+  mobile: boolean
+  bitness?: string
+  wow64?: boolean
+}
+
+export interface ClientEnvironmentRequest {
+  userAgent: string
+  platform: string
+  acceptLanguage: string
+  colorScheme: ClientColorScheme
+  userAgentMetadata?: UserAgentMetadata
 }
 
 export interface CaptureFrameOptions extends RequestOptions {

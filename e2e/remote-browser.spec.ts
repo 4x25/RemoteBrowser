@@ -2,6 +2,7 @@ import {
   expect,
   test,
   type APIRequestContext,
+  type Browser,
   type Page,
 } from '@playwright/test'
 
@@ -15,12 +16,55 @@ interface MockEvent {
   height?: number
   deviceScaleFactor?: number
   args?: { size?: { width?: number; height?: number } }
+  userAgent?: {
+    userAgent?: string
+    acceptLanguage?: string
+    platform?: string
+    userAgentMetadata?: {
+      platform?: string
+    }
+  }
+  media?: {
+    media?: string
+    features?: Array<{ name?: string; value?: string }>
+  }
 }
 
 async function mockEvents(request: APIRequestContext): Promise<MockEvent[]> {
   const response = await request.get(`${mockOrigin}/events`)
   expect(response.ok()).toBe(true)
   return response.json() as Promise<MockEvent[]>
+}
+
+function mediaFeature(event: MockEvent, name: string): string | undefined {
+  return event.media?.features?.find((feature) => feature.name === name)?.value
+}
+
+async function connectCustomBrowserEnvironment(
+  browser: Browser,
+  userAgent: string,
+): Promise<{ page: Page; close: () => Promise<void> }> {
+  const context = await browser.newContext({
+    baseURL: 'http://127.0.0.1:4173',
+    userAgent,
+    locale: 'zh-CN',
+    colorScheme: 'dark',
+  })
+  await context.addInitScript(() => {
+    Object.defineProperty(Navigator.prototype, 'languages', {
+      configurable: true,
+      get: () => ['zh-CN', 'en-US', 'en'],
+    })
+  })
+  const page = await context.newPage()
+  await page.goto('/')
+
+  const dialog = page.getByRole('dialog', { name: '连接 BrowserOS' })
+  await dialog.getByLabel('MCP 地址').fill(endpoint)
+  await dialog.getByRole('button', { name: '连接浏览器' }).click()
+  await expect(dialog).toBeHidden()
+
+  return { page, close: () => context.close() }
 }
 
 async function expectRemoteViewportToMatch(
@@ -107,6 +151,19 @@ test('connects and drives BrowserOS tabs, navigation and viewport input', async 
   await expect(page.getByRole('tab', { name: /example.org/ })).toBeVisible()
   await expect(page.getByRole('button', { name: '后退' })).toBeEnabled()
 
+  await expect
+    .poll(async () => {
+      const events = await mockEvents(request)
+      const navigationIndex = events.findIndex(
+        (event) => event.kind === 'navigate' && event.page === 101,
+      )
+      const environmentIndex = events.findIndex(
+        (event) => event.kind === 'apply_environment' && event.page === 101,
+      )
+      return navigationIndex > environmentIndex && environmentIndex >= 0
+    }, { message: 'the client environment should be applied before navigation' })
+    .toBe(true)
+
   const newTabButton = page.getByRole('button', { name: '新建标签页' })
   const existingTab = page.getByRole('tab', { name: /example.org/ })
   const [tabBox, newButtonBox, stripBox] = await Promise.all([
@@ -130,6 +187,22 @@ test('connects and drives BrowserOS tabs, navigation and viewport input', async 
     'aria-selected',
     'true',
   )
+  await expect
+    .poll(async () => {
+      const events = await mockEvents(request)
+      const environmentIndex = events.findIndex(
+        (event) => event.kind === 'apply_environment' && event.page !== 101,
+      )
+      if (environmentIndex < 0) return false
+      const environment = events[environmentIndex]
+      return events.some(
+        (event, index) =>
+          index > environmentIndex &&
+          event.kind === 'screenshot' &&
+          event.page === environment?.page,
+      )
+    }, { message: 'a new tab should receive the environment before its first frame' })
+    .toBe(true)
 
   await page.setViewportSize({ width: 650, height: 500 })
   const connectionButton = page.getByRole('button', { name: '切换连接' })
@@ -229,4 +302,75 @@ test('keeps the preview and remote viewport aligned with its container', async (
       Math.abs((event.height ?? 0) - viewportBox.height) <= 1,
   )
   expect(resizedViewport?.deviceScaleFactor).toBeLessThanOrEqual(1)
+})
+
+test('forwards the local browser environment before capture and reapplies theme changes', async ({
+  browser,
+  request,
+}) => {
+  const userAgent = 'RemoteBrowserOS-E2E/1.0'
+  const remote = await connectCustomBrowserEnvironment(browser, userAgent)
+
+  try {
+    const localEnvironment = await remote.page.evaluate(() => ({
+      platform: navigator.platform,
+      userAgentDataPlatform: (
+        navigator as Navigator & {
+          userAgentData?: { platform?: string }
+        }
+      ).userAgentData?.platform,
+    }))
+    await expect
+      .poll(async () => {
+        const events = await mockEvents(request)
+        const environmentIndex = events.findIndex(
+          (event) => event.kind === 'apply_environment',
+        )
+        if (environmentIndex < 0) return false
+
+        const environment = events[environmentIndex]
+        const firstScreenshotIndex = events.findIndex(
+          (event) =>
+            event.kind === 'screenshot' && event.page === environment?.page,
+        )
+
+        return (
+          environment.userAgent?.userAgent === userAgent &&
+          environment.userAgent.acceptLanguage === 'zh-CN,en-US,en' &&
+          environment.userAgent.platform === localEnvironment.platform &&
+          (!localEnvironment.userAgentDataPlatform ||
+            environment.userAgent.userAgentMetadata?.platform ===
+              localEnvironment.userAgentDataPlatform) &&
+          mediaFeature(environment, 'prefers-color-scheme') === 'dark' &&
+          firstScreenshotIndex > environmentIndex
+        )
+      }, { message: 'local UA, language and dark theme should precede the first screenshot' })
+      .toBe(true)
+
+    const eventOffset = (await mockEvents(request)).length
+    await remote.page.emulateMedia({ colorScheme: 'light' })
+
+    await expect
+      .poll(async () => {
+        const events = (await mockEvents(request)).slice(eventOffset)
+        const environmentIndex = events.findIndex(
+          (event) =>
+            event.kind === 'apply_environment' &&
+            event.userAgent?.userAgent === userAgent &&
+            event.userAgent.acceptLanguage === 'zh-CN,en-US,en' &&
+            mediaFeature(event, 'prefers-color-scheme') === 'light',
+        )
+        if (environmentIndex < 0) return false
+
+        return events.some(
+          (event, index) =>
+            index > environmentIndex &&
+            event.kind === 'screenshot' &&
+            event.page === events[environmentIndex]?.page,
+        )
+      }, { message: 'a light-theme override and refreshed frame should follow the media change' })
+      .toBe(true)
+  } finally {
+    await remote.close()
+  }
 })

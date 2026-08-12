@@ -104,9 +104,76 @@ function parseViewportOverride(code) {
   }
 }
 
+function parseEnvironmentOverride(code) {
+  const pattern =
+    /cdpJsonForPage\(\s*(\d+)\s*,\s*["'](Network\.setUserAgentOverride|Emulation\.setEmulatedMedia)["']\s*,\s*("(?:\\.|[^"\\])*")\s*\)/g
+  const calls = []
+
+  for (const match of code.matchAll(pattern)) {
+    try {
+      calls.push({
+        pageId: Number(match[1]),
+        method: match[2],
+        parameters: JSON.parse(JSON.parse(match[3])),
+      })
+    } catch {
+      return null
+    }
+  }
+
+  const userAgentCall = calls.find(
+    (call) => call.method === 'Network.setUserAgentOverride',
+  )
+  const mediaCall = calls.find(
+    (call) => call.method === 'Emulation.setEmulatedMedia',
+  )
+  if (
+    !userAgentCall ||
+    !mediaCall ||
+    !Number.isInteger(userAgentCall.pageId) ||
+    userAgentCall.pageId !== mediaCall.pageId
+  ) {
+    return null
+  }
+
+  return {
+    pageId: userAgentCall.pageId,
+    userAgent: userAgentCall.parameters,
+    media: mediaCall.parameters,
+  }
+}
+
 async function toolCall(name, args) {
   if (name === 'run') {
     const code = String(args.code)
+    const environmentOverride = parseEnvironmentOverride(code)
+    if (environmentOverride) {
+      const { pageId, userAgent, media } = environmentOverride
+      const page = pages.find((candidate) => candidate.pageId === pageId)
+      if (!page) {
+        return {
+          isError: true,
+          content: [{ type: 'text', text: `missing page ${pageId}` }],
+        }
+      }
+
+      events.push({
+        kind: 'apply_environment',
+        page: pageId,
+        userAgent,
+        media,
+        receivedAt: Date.now(),
+      })
+      return {
+        content: [{ type: 'text', text: 'ok' }],
+        structuredContent: {
+          ok: true,
+          value: { pageId },
+          logs: [],
+        },
+      }
+    }
+
     const viewportOverride = parseViewportOverride(code)
     if (viewportOverride) {
       const { pageId, parameters } = viewportOverride
@@ -177,6 +244,13 @@ async function toolCall(name, args) {
   }
 
   if (name === 'navigate') {
+    events.push({
+      kind: 'navigate',
+      page: args.page,
+      action: args.action,
+      url: args.url,
+      receivedAt: Date.now(),
+    })
     const page = pages.find((candidate) => candidate.pageId === args.page)
     if (page && args.action === 'url') {
       const url = new URL(args.url)

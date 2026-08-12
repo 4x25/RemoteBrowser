@@ -6,6 +6,8 @@ export { LIST_TABS_SCRIPT } from './scripts'
 export type {
   BrowserOsClientOptions,
   CaptureFrameOptions,
+  ClientColorScheme,
+  ClientEnvironmentRequest,
   ClickOptions,
   ConnectionState,
   McpServerInfo,
@@ -22,5 +24,7 @@ export type {
   ScrollDirection,
   ScrollOptions,
   SetViewportRequest,
+  UserAgentBrandVersion,
+  UserAgentMetadata,
   ViewportMetrics,
 } from './types'

@@ -18,6 +18,11 @@ import {
   type CaptureSize,
 } from '../lib/frame'
 import { FrameCache } from '../lib/frameCache'
+import {
+  collectClientEnvironment,
+  environmentKey,
+  type ClientEnvironment,
+} from '../lib/clientEnvironment'
 
 export type ViewportPhase =
   | 'empty'
@@ -49,6 +54,17 @@ interface AppliedViewport {
 interface CapturedFrame {
   encoded: RemoteFrame
   viewport: ViewportMetrics
+}
+
+interface ClientEnvironmentSnapshot {
+  generation: number
+  key: string
+  environment: ClientEnvironment
+}
+
+interface AppliedClientEnvironment {
+  client: BrowserOsClient
+  key: string
 }
 
 interface RemoteBrowserState {
@@ -280,6 +296,16 @@ export function useRemoteBrowser(): RemoteBrowserController {
   const pendingHoverRef = useRef(new Map<number, RemotePoint>())
   const hoverScheduledRef = useRef(new Set<number>())
   const appliedViewportsRef = useRef(new Map<number, AppliedViewport>())
+  const environmentGenerationRef = useRef(0)
+  const environmentSnapshotRef = useRef<ClientEnvironmentSnapshot | null>(null)
+  const environmentRequestRef = useRef<{
+    generation: number
+    promise: Promise<ClientEnvironment>
+  } | null>(null)
+  const appliedEnvironmentsRef = useRef(
+    new Map<number, AppliedClientEnvironment>(),
+  )
+  const environmentQueuesRef = useRef(new Map<number, Promise<void>>())
   const frameCacheRef = useRef<FrameCache<DisplayFrame> | null>(null)
   if (!frameCacheRef.current) frameCacheRef.current = new FrameCache()
 
@@ -298,6 +324,9 @@ export function useRemoteBrowser(): RemoteBrowserController {
     frameCacheRef.current?.retain(pageIds)
     for (const pageId of appliedViewportsRef.current.keys()) {
       if (!retained.has(pageId)) appliedViewportsRef.current.delete(pageId)
+    }
+    for (const pageId of appliedEnvironmentsRef.current.keys()) {
+      if (!retained.has(pageId)) appliedEnvironmentsRef.current.delete(pageId)
     }
   }, [])
 
@@ -429,8 +458,116 @@ export function useRemoteBrowser(): RemoteBrowserController {
     return request
   }, [loadTabs, send])
 
+  const getClientEnvironment = useCallback(
+    async (): Promise<ClientEnvironmentSnapshot> => {
+      while (true) {
+        const generation = environmentGenerationRef.current
+        const cached = environmentSnapshotRef.current
+        if (cached?.generation === generation) return cached
+
+        let pending = environmentRequestRef.current
+        if (!pending || pending.generation !== generation) {
+          pending = {
+            generation,
+            promise: collectClientEnvironment(),
+          }
+          environmentRequestRef.current = pending
+        }
+
+        let environment: ClientEnvironment
+        try {
+          environment = await pending.promise
+        } finally {
+          if (environmentRequestRef.current === pending) {
+            environmentRequestRef.current = null
+          }
+        }
+
+        if (generation !== environmentGenerationRef.current) continue
+        const snapshot = {
+          generation,
+          key: environmentKey(environment),
+          environment,
+        }
+        environmentSnapshotRef.current = snapshot
+        return snapshot
+      }
+    },
+    [],
+  )
+
+  const ensureClientEnvironment = useCallback(
+    (client: BrowserOsClient, pageId: number): Promise<void> => {
+      const previous = environmentQueuesRef.current.get(pageId)
+        ?? Promise.resolve()
+      const next = previous.catch(() => undefined).then(async () => {
+        while (true) {
+          if (client !== clientRef.current || client.state !== 'connected') {
+            throw new McpCallError('BrowserOS environment request was superseded', {
+              kind: 'aborted',
+              code: 'ABORTED',
+            })
+          }
+
+          const snapshot = await getClientEnvironment()
+          if (client !== clientRef.current || client.state !== 'connected') {
+            throw new McpCallError('BrowserOS environment request was superseded', {
+              kind: 'aborted',
+              code: 'ABORTED',
+            })
+          }
+          const applied = appliedEnvironmentsRef.current.get(pageId)
+          if (applied?.client === client && applied.key === snapshot.key) return
+
+          const environment = snapshot.environment
+          await client.applyClientEnvironment(pageId, {
+            userAgent: environment.userAgent,
+            platform: environment.platform,
+            acceptLanguage: environment.acceptLanguage,
+            colorScheme: environment.colorScheme,
+            ...(environment.userAgentMetadata
+              ? { userAgentMetadata: environment.userAgentMetadata }
+              : {}),
+          })
+
+          if (snapshot.generation !== environmentGenerationRef.current) {
+            continue
+          }
+          if (client !== clientRef.current || client.state !== 'connected') {
+            throw new McpCallError('BrowserOS environment request was superseded', {
+              kind: 'aborted',
+              code: 'ABORTED',
+            })
+          }
+          appliedEnvironmentsRef.current.set(pageId, {
+            client,
+            key: snapshot.key,
+          })
+          return
+        }
+      })
+
+      environmentQueuesRef.current.set(pageId, next)
+      void next.then(
+        () => {
+          if (environmentQueuesRef.current.get(pageId) === next) {
+            environmentQueuesRef.current.delete(pageId)
+          }
+        },
+        () => {
+          if (environmentQueuesRef.current.get(pageId) === next) {
+            environmentQueuesRef.current.delete(pageId)
+          }
+        },
+      )
+      return next
+    },
+    [getClientEnvironment],
+  )
+
   const captureEncodedFrame = useCallback(
     async (client: BrowserOsClient, pageId: number): Promise<CapturedFrame> => {
+      await ensureClientEnvironment(client, pageId)
       const size = captureSizeRef.current
       const previous = appliedViewportsRef.current.get(pageId)
       let viewport: ViewportMetrics
@@ -478,7 +615,7 @@ export function useRemoteBrowser(): RemoteBrowserController {
         return { encoded, viewport }
       }
     },
-    [],
+    [ensureClientEnvironment],
   )
 
   const runCapture = useCallback(async () => {
@@ -571,6 +708,8 @@ export function useRemoteBrowser(): RemoteBrowserController {
     pendingHoverRef.current.clear()
     hoverScheduledRef.current.clear()
     appliedViewportsRef.current.clear()
+    appliedEnvironmentsRef.current.clear()
+    environmentQueuesRef.current.clear()
     clearFrameCache()
     send({ type: 'disconnected' })
   }, [clearFrameCache, clearTimers, send])
@@ -604,6 +743,8 @@ export function useRemoteBrowser(): RemoteBrowserController {
       pendingHoverRef.current.clear()
       hoverScheduledRef.current.clear()
       appliedViewportsRef.current.clear()
+      appliedEnvironmentsRef.current.clear()
+      environmentQueuesRef.current.clear()
       clearFrameCache()
       frameGenerationRef.current += 1
       send({ type: 'connecting', endpoint })
@@ -656,6 +797,7 @@ export function useRemoteBrowser(): RemoteBrowserController {
             kind: 'connection',
           })
         }
+        await ensureClientEnvironment(client, pageId)
         await action(client)
       })
       pageQueuesRef.current.set(pageId, next)
@@ -673,7 +815,7 @@ export function useRemoteBrowser(): RemoteBrowserController {
       )
       return next
     },
-    [],
+    [ensureClientEnvironment],
   )
 
   const enqueueTabActivation = useCallback(
@@ -996,6 +1138,32 @@ export function useRemoteBrowser(): RemoteBrowserController {
     return () => document.removeEventListener('visibilitychange', handleVisibility)
   }, [scheduleCapture])
 
+  useEffect(() => {
+    const colorScheme = window.matchMedia?.('(prefers-color-scheme: dark)')
+    const handleEnvironmentChange = () => {
+      environmentGenerationRef.current += 1
+      environmentSnapshotRef.current = null
+      appliedEnvironmentsRef.current.clear()
+      frameGenerationRef.current += 1
+      scheduleCapture(true)
+    }
+
+    if (typeof colorScheme?.addEventListener === 'function') {
+      colorScheme.addEventListener('change', handleEnvironmentChange)
+    } else if (typeof colorScheme?.addListener === 'function') {
+      colorScheme.addListener(handleEnvironmentChange)
+    }
+    window.addEventListener('languagechange', handleEnvironmentChange)
+    return () => {
+      if (typeof colorScheme?.removeEventListener === 'function') {
+        colorScheme.removeEventListener('change', handleEnvironmentChange)
+      } else if (typeof colorScheme?.removeListener === 'function') {
+        colorScheme.removeListener(handleEnvironmentChange)
+      }
+      window.removeEventListener('languagechange', handleEnvironmentChange)
+    }
+  }, [scheduleCapture])
+
   useEffect(
     () => () => {
       lifecycleRef.current += 1
@@ -1004,6 +1172,8 @@ export function useRemoteBrowser(): RemoteBrowserController {
       clearTimers()
       clientRef.current?.disconnect()
       appliedViewportsRef.current.clear()
+      appliedEnvironmentsRef.current.clear()
+      environmentQueuesRef.current.clear()
       clearFrameCache()
     },
     [clearFrameCache, clearTimers],

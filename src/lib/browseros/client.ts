@@ -11,12 +11,14 @@ import {
 } from './protocol'
 import {
   activatePageScript,
+  applyClientEnvironmentScript,
   LIST_TABS_SCRIPT,
   setViewportScript,
 } from './scripts'
 import type {
   BrowserOsClientOptions,
   CaptureFrameOptions,
+  ClientEnvironmentRequest,
   ClickOptions,
   ConnectionState,
   McpServerInfo,
@@ -29,6 +31,8 @@ import type {
   RequestOptions,
   ScrollOptions,
   SetViewportRequest,
+  UserAgentBrandVersion,
+  UserAgentMetadata,
   ViewportMetrics,
 } from './types'
 
@@ -40,6 +44,11 @@ const MAX_CAPTURE_WIDTH = 1440
 const MAX_CAPTURE_HEIGHT = 900
 const MAX_VIEWPORT_DIMENSION = 10_000_000
 const MAX_DEVICE_SCALE_FACTOR = 10
+const MAX_USER_AGENT_LENGTH = 4096
+const MAX_PLATFORM_LENGTH = 256
+const MAX_ACCEPT_LANGUAGE_LENGTH = 1024
+const MAX_METADATA_STRING_LENGTH = 1024
+const MAX_BRAND_LIST_LENGTH = 32
 const REQUIRED_TOOLS = ['tabs', 'navigate', 'screenshot', 'act', 'run'] as const
 
 interface InitializeResult {
@@ -105,6 +114,151 @@ function assertPoint(point: RemotePoint, name: string): void {
 function assertTimeout(timeoutMs: number): void {
   if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 120_000) {
     throw validationError('timeoutMs must be an integer between 1 and 120000')
+  }
+}
+
+function validateEnvironmentString(
+  value: unknown,
+  name: string,
+  maximum: number,
+  allowEmpty = false,
+): string {
+  if (
+    typeof value !== 'string' ||
+    (!allowEmpty && value.length === 0) ||
+    value.trim() !== value
+  ) {
+    throw validationError(
+      `${name} must be a non-empty string without surrounding whitespace`,
+    )
+  }
+  if (value.length > maximum) {
+    throw validationError(`${name} must be at most ${maximum} characters`)
+  }
+  if (/[\u0000-\u001f\u007f]/u.test(value)) {
+    throw validationError(`${name} must not contain control characters`)
+  }
+  return value
+}
+
+function normalizeBrandList(
+  value: unknown,
+  name: string,
+): UserAgentBrandVersion[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value) || value.length > MAX_BRAND_LIST_LENGTH) {
+    throw validationError(
+      `${name} must be an array with at most ${MAX_BRAND_LIST_LENGTH} entries`,
+    )
+  }
+
+  return value.map((entry, index) => {
+    if (!isRecordValue(entry)) {
+      throw validationError(`${name}[${index}] must be a brand/version object`)
+    }
+    return {
+      brand: validateEnvironmentString(
+        entry.brand,
+        `${name}[${index}].brand`,
+        MAX_METADATA_STRING_LENGTH,
+      ),
+      version: validateEnvironmentString(
+        entry.version,
+        `${name}[${index}].version`,
+        MAX_METADATA_STRING_LENGTH,
+      ),
+    }
+  })
+}
+
+function normalizeUserAgentMetadata(value: unknown): UserAgentMetadata | undefined {
+  if (value === undefined) return undefined
+  if (!isRecordValue(value)) {
+    throw validationError('userAgentMetadata must be an object')
+  }
+
+  const brands = normalizeBrandList(value.brands, 'userAgentMetadata.brands')
+  const fullVersionList = normalizeBrandList(
+    value.fullVersionList,
+    'userAgentMetadata.fullVersionList',
+  )
+  if (typeof value.mobile !== 'boolean') {
+    throw validationError('userAgentMetadata.mobile must be a boolean')
+  }
+  if (value.wow64 !== undefined && typeof value.wow64 !== 'boolean') {
+    throw validationError('userAgentMetadata.wow64 must be a boolean')
+  }
+
+  return {
+    ...(brands === undefined ? {} : { brands }),
+    ...(fullVersionList === undefined ? {} : { fullVersionList }),
+    platform: validateEnvironmentString(
+      value.platform,
+      'userAgentMetadata.platform',
+      MAX_METADATA_STRING_LENGTH,
+    ),
+    platformVersion: validateEnvironmentString(
+      value.platformVersion,
+      'userAgentMetadata.platformVersion',
+      MAX_METADATA_STRING_LENGTH,
+      true,
+    ),
+    architecture: validateEnvironmentString(
+      value.architecture,
+      'userAgentMetadata.architecture',
+      MAX_METADATA_STRING_LENGTH,
+      true,
+    ),
+    model: validateEnvironmentString(
+      value.model,
+      'userAgentMetadata.model',
+      MAX_METADATA_STRING_LENGTH,
+      true,
+    ),
+    mobile: value.mobile,
+    ...(value.bitness === undefined
+      ? {}
+      : {
+          bitness: validateEnvironmentString(
+            value.bitness,
+            'userAgentMetadata.bitness',
+            MAX_METADATA_STRING_LENGTH,
+            true,
+          ),
+        }),
+    ...(value.wow64 === undefined ? {} : { wow64: value.wow64 }),
+  }
+}
+
+function normalizeClientEnvironment(
+  request: ClientEnvironmentRequest,
+): ClientEnvironmentRequest {
+  if (!isRecordValue(request)) {
+    throw validationError('client environment request is required')
+  }
+  if (request.colorScheme !== 'light' && request.colorScheme !== 'dark') {
+    throw validationError('colorScheme must be light or dark')
+  }
+
+  const userAgentMetadata = normalizeUserAgentMetadata(request.userAgentMetadata)
+  return {
+    userAgent: validateEnvironmentString(
+      request.userAgent,
+      'userAgent',
+      MAX_USER_AGENT_LENGTH,
+    ),
+    platform: validateEnvironmentString(
+      request.platform,
+      'platform',
+      MAX_PLATFORM_LENGTH,
+    ),
+    acceptLanguage: validateEnvironmentString(
+      request.acceptLanguage,
+      'acceptLanguage',
+      MAX_ACCEPT_LANGUAGE_LENGTH,
+    ),
+    colorScheme: request.colorScheme,
+    ...(userAgentMetadata === undefined ? {} : { userAgentMetadata }),
   }
 }
 
@@ -586,6 +740,30 @@ export class BrowserOsClient {
       )
     }
     return viewport
+  }
+
+  async applyClientEnvironment(
+    pageId: number,
+    request: ClientEnvironmentRequest,
+    options: RequestOptions = {},
+  ): Promise<void> {
+    this.assertPage(pageId)
+    const environment = normalizeClientEnvironment(request)
+    const result = await this.callTool(
+      'run',
+      { code: applyClientEnvironmentScript(pageId, environment) },
+      options,
+    )
+    const value = ensureRunValue(
+      result,
+      `Applying client environment to BrowserOS page ${pageId}`,
+    )
+    if (!isRecordValue(value) || value.pageId !== pageId) {
+      throw new McpCallError(
+        `BrowserOS returned invalid environment data for page ${pageId}`,
+        { kind: 'protocol', data: value },
+      )
+    }
   }
 
   async captureFrame(

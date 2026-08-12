@@ -317,6 +317,118 @@ describe('BrowserOsClient tools', () => {
     })
   })
 
+  it('applies the local user agent and color scheme through CDP in order', async () => {
+    let runCode = ''
+    const { client } = await connectedClient((body) => {
+      const params = body.params as
+        | { name?: string; arguments?: { code?: unknown } }
+        | undefined
+      if (params?.name !== 'run') return { content: [] }
+      runCode = String(params.arguments?.code ?? '')
+      return {
+        content: [{ type: 'text', text: 'ok' }],
+        structuredContent: {
+          ok: true,
+          logs: [],
+          value: { pageId: 9 },
+        },
+      }
+    })
+    const userAgent = 'Mozilla/5.0 "); globalThis.injected = true; //'
+    const userAgentMetadata = {
+      brands: [
+        { brand: 'Chromium', version: '136' },
+        { brand: 'Not/A)Brand', version: '99' },
+      ],
+      fullVersionList: [{ brand: 'Chromium', version: '136.0.0.0' }],
+      platform: 'Linux',
+      platformVersion: '6.8.0',
+      architecture: 'x86',
+      model: '',
+      mobile: false,
+      bitness: '64',
+      wow64: false,
+    }
+
+    await client.applyClientEnvironment(9, {
+      userAgent,
+      platform: 'Linux x86_64',
+      acceptLanguage: 'zh-CN,zh,en-US,en',
+      colorScheme: 'dark',
+      userAgentMetadata,
+    })
+
+    const userAgentParams = JSON.stringify({
+      userAgent,
+      acceptLanguage: 'zh-CN,zh,en-US,en',
+      platform: 'Linux x86_64',
+      userAgentMetadata,
+    })
+    const mediaParams = JSON.stringify({
+      media: 'screen',
+      features: [{ name: 'prefers-color-scheme', value: 'dark' }],
+    })
+    expect(runCode).toBe(
+      `await browser.cdpJsonForPage(9, "Network.setUserAgentOverride", ${JSON.stringify(userAgentParams)});\n` +
+        `await browser.cdpJsonForPage(9, "Emulation.setEmulatedMedia", ${JSON.stringify(mediaParams)});\n` +
+        'return { pageId: 9 };',
+    )
+    expect(runCode.indexOf('Network.setUserAgentOverride')).toBeLessThan(
+      runCode.indexOf('Emulation.setEmulatedMedia'),
+    )
+  })
+
+  it('rejects invalid environment data and mismatched run results', async () => {
+    const { client, fetchMock } = await connectedClient((body) => {
+      const params = body.params as { name?: string } | undefined
+      if (params?.name !== 'run') return { content: [] }
+      return {
+        structuredContent: {
+          ok: true,
+          value: { pageId: 12 },
+        },
+      }
+    })
+    const environment = {
+      userAgent: 'Mozilla/5.0',
+      platform: 'Linux x86_64',
+      acceptLanguage: 'en-US,en',
+      colorScheme: 'light' as const,
+    }
+    const callCount = fetchMock.mock.calls.length
+
+    await expect(
+      client.applyClientEnvironment(4, {
+        ...environment,
+        userAgent: 'Mozilla/5.0\nInjected',
+      }),
+    ).rejects.toEqual(expect.objectContaining({ kind: 'validation' }))
+    await expect(
+      client.applyClientEnvironment(4, {
+        ...environment,
+        colorScheme: 'system' as 'light',
+      }),
+    ).rejects.toEqual(expect.objectContaining({ kind: 'validation' }))
+    await expect(
+      client.applyClientEnvironment(4, {
+        ...environment,
+        userAgentMetadata: {
+          brands: [{ brand: '', version: '136' }],
+          platform: 'Linux',
+          platformVersion: '',
+          architecture: 'x86',
+          model: '',
+          mobile: false,
+        },
+      }),
+    ).rejects.toEqual(expect.objectContaining({ kind: 'validation' }))
+    expect(fetchMock).toHaveBeenCalledTimes(callCount)
+
+    await expect(client.applyClientEnvironment(4, environment)).rejects.toEqual(
+      expect.objectContaining({ kind: 'protocol' }),
+    )
+  })
+
   it('rejects malformed viewport metrics from BrowserOS', async () => {
     const { client } = await connectedClient((body) => {
       const params = body.params as { name?: string } | undefined

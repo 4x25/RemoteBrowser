@@ -1,3 +1,5 @@
+import type { ClientEnvironmentRequest } from './types'
+
 /**
  * The BrowserOS `run` tool has no separate arguments object, so the script is
  * deliberately constant. It reads only serializable page metadata and CDP
@@ -38,4 +40,26 @@ export function setViewportScript(
   })
 
   return `await browser.cdpJsonForPage(${pageId}, "Emulation.setDeviceMetricsOverride", ${JSON.stringify(override)});\nconst metrics = await browser.cdpJsonForPage(${pageId}, "Page.getLayoutMetrics", "{}");\nreturn { pageId: ${pageId}, metrics };`
+}
+
+export function applyClientEnvironmentScript(
+  pageId: number,
+  request: ClientEnvironmentRequest,
+): string {
+  const userAgentOverride = JSON.stringify({
+    userAgent: request.userAgent,
+    acceptLanguage: request.acceptLanguage,
+    platform: request.platform,
+    ...(request.userAgentMetadata === undefined
+      ? {}
+      : { userAgentMetadata: request.userAgentMetadata }),
+  })
+  const emulatedMedia = JSON.stringify({
+    media: 'screen',
+    features: [
+      { name: 'prefers-color-scheme', value: request.colorScheme },
+    ],
+  })
+
+  return `await browser.cdpJsonForPage(${pageId}, "Network.setUserAgentOverride", ${JSON.stringify(userAgentOverride)});\nawait browser.cdpJsonForPage(${pageId}, "Emulation.setEmulatedMedia", ${JSON.stringify(emulatedMedia)});\nreturn { pageId: ${pageId} };`
 }
