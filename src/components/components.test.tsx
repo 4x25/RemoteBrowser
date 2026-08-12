@@ -99,6 +99,45 @@ describe("TabStrip", () => {
     fireEvent.click(screen.getByRole("button", { name: "新建标签页" }));
     expect(onNew).toHaveBeenCalledTimes(1);
   });
+
+  it("keeps creation independent from background syncing and shows progress", () => {
+    const onNew = vi.fn();
+    const { container, rerender } = render(
+      <TabStrip
+        tabs={tabs}
+        activeTabId="one"
+        busy
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        onNew={onNew}
+      />,
+    );
+
+    const newButton = screen.getByRole("button", { name: "新建标签页" });
+    expect(newButton).toBeEnabled();
+    expect(newButton.closest(".rb-tab-strip__track")).not.toBeNull();
+    expect(
+      newButton.previousElementSibling?.getAttribute("role"),
+    ).toBe("tablist");
+
+    rerender(
+      <TabStrip
+        tabs={tabs}
+        activeTabId="one"
+        creating
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        onNew={onNew}
+      />,
+    );
+
+    expect(newButton).toBeDisabled();
+    expect(newButton).toHaveAttribute("aria-busy", "true");
+    expect(newButton.querySelector(".rb-spinner--small")).not.toBeNull();
+    expect(container.querySelector(".rb-tab-strip__new svg")).toBeNull();
+    fireEvent.click(newButton);
+    expect(onNew).not.toHaveBeenCalled();
+  });
 });
 
 describe("Toolbar", () => {
@@ -124,6 +163,27 @@ describe("Toolbar", () => {
     expect((screen.getByRole("button", { name: "后退" }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.submit(screen.getByRole("search"));
     expect(onNavigate).toHaveBeenCalledWith("example.com");
+  });
+
+  it("keeps an accessible connection label separate from its compact icon", () => {
+    render(
+      <Toolbar
+        address=""
+        connectionStatus="connected"
+        onAddressChange={vi.fn()}
+        onNavigate={vi.fn()}
+        onBack={vi.fn()}
+        onForward={vi.fn()}
+        onRefresh={vi.fn()}
+        onConnectionClick={vi.fn()}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "切换连接" });
+    expect(button.querySelector(".rb-browser-toolbar__connection-label"))
+      .toHaveTextContent("切换连接");
+    expect(button.querySelector(".rb-browser-toolbar__connection-menu"))
+      .toHaveAttribute("aria-hidden", "true");
   });
 });
 

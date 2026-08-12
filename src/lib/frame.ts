@@ -1,6 +1,9 @@
 export interface CaptureSize {
   width: number
   height: number
+  viewportWidth: number
+  viewportHeight: number
+  deviceScaleFactor: number
 }
 
 export interface EncodedImage {
@@ -21,15 +24,39 @@ export function computeCaptureSize(
   cssHeight: number,
   devicePixelRatio = window.devicePixelRatio || 1,
 ): CaptureSize {
-  const safeWidth = Number.isFinite(cssWidth) ? Math.max(1, cssWidth) : 1
-  const safeHeight = Number.isFinite(cssHeight) ? Math.max(1, cssHeight) : 1
+  const viewportWidth = Number.isFinite(cssWidth)
+    ? Math.max(1, Math.round(cssWidth))
+    : 1
+  const viewportHeight = Number.isFinite(cssHeight)
+    ? Math.max(1, Math.round(cssHeight))
+    : 1
   const safeDpr = Number.isFinite(devicePixelRatio)
     ? Math.max(1, devicePixelRatio)
     : 1
+  const deviceScaleFactor = Math.min(
+    safeDpr,
+    MAX_CAPTURE_WIDTH / viewportWidth,
+    MAX_CAPTURE_HEIGHT / viewportHeight,
+  )
 
   return {
-    width: Math.min(MAX_CAPTURE_WIDTH, Math.round(safeWidth * safeDpr)),
-    height: Math.min(MAX_CAPTURE_HEIGHT, Math.round(safeHeight * safeDpr)),
+    width: Math.max(
+      1,
+      Math.min(
+        MAX_CAPTURE_WIDTH,
+        Math.round(viewportWidth * deviceScaleFactor),
+      ),
+    ),
+    height: Math.max(
+      1,
+      Math.min(
+        MAX_CAPTURE_HEIGHT,
+        Math.round(viewportHeight * deviceScaleFactor),
+      ),
+    ),
+    viewportWidth,
+    viewportHeight,
+    deviceScaleFactor,
   }
 }
 

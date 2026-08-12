@@ -259,6 +259,85 @@ describe('BrowserOsClient tools', () => {
     )
   })
 
+  it('sets device metrics and returns the resulting viewport', async () => {
+    let runCode = ''
+    const { client } = await connectedClient((body) => {
+      const params = body.params as
+        | { name?: string; arguments?: { code?: unknown } }
+        | undefined
+      if (params?.name !== 'run') return { content: [] }
+      runCode = String(params.arguments?.code ?? '')
+      return {
+        content: [{ type: 'text', text: 'ok' }],
+        structuredContent: {
+          ok: true,
+          logs: [],
+          value: {
+            pageId: 7,
+            metrics: {
+              cssVisualViewport: {
+                clientWidth: 800,
+                clientHeight: 600,
+                pageX: 4,
+                pageY: 12,
+                offsetX: 0,
+                offsetY: 0,
+                scale: 1,
+                zoom: 1,
+              },
+              cssContentSize: { width: 800, height: 1800 },
+            },
+          },
+        },
+      }
+    })
+
+    const viewport = await client.setViewport(7, {
+      width: 800,
+      height: 600,
+      deviceScaleFactor: 2,
+    })
+
+    expect(runCode).toContain('"Emulation.setDeviceMetricsOverride"')
+    expect(runCode).toContain(
+      '{\\"width\\":800,\\"height\\":600,\\"deviceScaleFactor\\":2,\\"mobile\\":false,\\"screenWidth\\":800,\\"screenHeight\\":600}',
+    )
+    expect(runCode).toContain('"Page.getLayoutMetrics"')
+    expect(viewport).toEqual({
+      width: 800,
+      height: 600,
+      pageX: 4,
+      pageY: 12,
+      offsetX: 0,
+      offsetY: 0,
+      scale: 1,
+      zoom: 1,
+      contentWidth: 800,
+      contentHeight: 1800,
+    })
+  })
+
+  it('rejects malformed viewport metrics from BrowserOS', async () => {
+    const { client } = await connectedClient((body) => {
+      const params = body.params as { name?: string } | undefined
+      if (params?.name !== 'run') return { content: [] }
+      return {
+        structuredContent: {
+          ok: true,
+          value: { pageId: 7, metrics: { cssVisualViewport: null } },
+        },
+      }
+    })
+
+    await expect(
+      client.setViewport(7, {
+        width: 800,
+        height: 600,
+        deviceScaleFactor: 2,
+      }),
+    ).rejects.toEqual(expect.objectContaining({ kind: 'protocol' }))
+  })
+
   it('validates values before dispatching them', async () => {
     const { client, fetchMock } = await connectedClient()
     const callCount = fetchMock.mock.calls.length
@@ -271,6 +350,27 @@ describe('BrowserOsClient tools', () => {
     await expect(client.captureFrame(1, { width: 1441 })).rejects.toEqual(
       expect.objectContaining({ kind: 'validation' }),
     )
+    await expect(
+      client.setViewport(1, {
+        width: 0,
+        height: 600,
+        deviceScaleFactor: 1,
+      }),
+    ).rejects.toEqual(expect.objectContaining({ kind: 'validation' }))
+    await expect(
+      client.setViewport(1, {
+        width: 800,
+        height: 600.5,
+        deviceScaleFactor: 1,
+      }),
+    ).rejects.toEqual(expect.objectContaining({ kind: 'validation' }))
+    await expect(
+      client.setViewport(1, {
+        width: 800,
+        height: 600,
+        deviceScaleFactor: Number.NaN,
+      }),
+    ).rejects.toEqual(expect.objectContaining({ kind: 'validation' }))
     expect(fetchMock).toHaveBeenCalledTimes(callCount)
   })
 })

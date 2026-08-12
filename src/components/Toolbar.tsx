@@ -1,21 +1,21 @@
-import { useId, type FormEvent } from "react";
-import { StatusBadge, type ConnectionStatus } from "./StatusBadge";
+import { useId, type FormEvent } from 'react'
+import { StatusBadge, type ConnectionStatus } from './StatusBadge'
 
 export interface ToolbarProps {
-  address: string;
-  connectionStatus: ConnectionStatus;
-  endpoint?: string;
-  addressError?: string | null;
-  canGoBack?: boolean;
-  canGoForward?: boolean;
-  navigating?: boolean;
-  disabled?: boolean;
-  onAddressChange: (address: string) => void;
-  onNavigate: (address: string) => void;
-  onBack: () => void;
-  onForward: () => void;
-  onRefresh: () => void;
-  onConnectionClick: () => void;
+  address: string
+  connectionStatus: ConnectionStatus
+  endpoint?: string
+  addressError?: string | null
+  canGoBack?: boolean
+  canGoForward?: boolean
+  navigating?: boolean
+  disabled?: boolean
+  onAddressChange: (address: string) => void
+  onNavigate: (address: string) => void
+  onBack: () => void
+  onForward: () => void
+  onRefresh: () => void
+  onConnectionClick: () => void
 }
 
 export function Toolbar({
@@ -34,14 +34,15 @@ export function Toolbar({
   onRefresh,
   onConnectionClick,
 }: ToolbarProps) {
-  const errorId = useId();
-  const pageActionsDisabled = disabled || connectionStatus !== "connected";
+  const errorId = useId()
+  const pageActionsDisabled = disabled || connectionStatus !== 'connected'
+  const connectionLabel = connectionStatus === 'connected' ? '切换连接' : '连接'
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const nextAddress = address.trim();
-    if (nextAddress) onNavigate(nextAddress);
-  };
+    event.preventDefault()
+    const nextAddress = address.trim()
+    if (nextAddress) onNavigate(nextAddress)
+  }
 
   return (
     <div className="rb-browser-toolbar">
@@ -105,23 +106,32 @@ export function Toolbar({
         <button
           className="rb-browser-toolbar__connection-button"
           type="button"
-          disabled={connectionStatus === "connecting"}
-          title={endpoint || undefined}
+          aria-label={connectionLabel}
+          disabled={connectionStatus === 'connecting'}
+          title={endpoint ? `${connectionLabel}：${endpoint}` : connectionLabel}
           onClick={onConnectionClick}
         >
-          {connectionStatus === "connected" ? "切换连接" : "连接"}
+          <span className="rb-browser-toolbar__connection-label">
+            {connectionLabel}
+          </span>
+          <span
+            className="rb-browser-toolbar__connection-menu"
+            aria-hidden="true"
+          >
+            ⋮
+          </span>
         </button>
       </div>
     </div>
-  );
+  )
 }
 
 interface IconButtonProps {
-  label: string;
-  icon: React.ReactNode;
-  disabled: boolean;
-  busy?: boolean;
-  onClick: () => void;
+  label: string
+  icon: React.ReactNode
+  disabled: boolean
+  busy?: boolean
+  onClick: () => void
 }
 
 function IconButton({
@@ -143,7 +153,7 @@ function IconButton({
     >
       {busy ? <span className="rb-spinner rb-spinner--small" aria-hidden="true" /> : icon}
     </button>
-  );
+  )
 }
 
 function BackIcon() {
@@ -151,7 +161,7 @@ function BackIcon() {
     <svg viewBox="0 0 20 20" focusable="false" aria-hidden="true">
       <path d="m12.5 4.5-5 5.5 5 5.5" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7" />
     </svg>
-  );
+  )
 }
 
 function ForwardIcon() {
@@ -159,7 +169,7 @@ function ForwardIcon() {
     <svg viewBox="0 0 20 20" focusable="false" aria-hidden="true">
       <path d="m7.5 4.5 5 5.5-5 5.5" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7" />
     </svg>
-  );
+  )
 }
 
 function RefreshIcon() {
@@ -168,7 +178,7 @@ function RefreshIcon() {
       <path d="M15.8 8A6.2 6.2 0 1 0 16 11" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.7" />
       <path d="m12.5 7.7 3.5.5.4-3.5" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7" />
     </svg>
-  );
+  )
 }
 
 function GlobeIcon() {
@@ -177,5 +187,5 @@ function GlobeIcon() {
       <circle cx="10" cy="10" r="7" fill="none" stroke="currentColor" strokeWidth="1.4" />
       <path d="M3.5 10h13M10 3c2 2 2.5 4.3 2.5 7S12 15 10 17c-2-2-2.5-4.3-2.5-7S8 5 10 3Z" fill="none" stroke="currentColor" strokeWidth="1.2" />
     </svg>
-  );
+  )
 }

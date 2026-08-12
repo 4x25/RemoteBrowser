@@ -9,7 +9,11 @@ import {
   type McpImageContent,
   type McpToolResult,
 } from './protocol'
-import { activatePageScript, LIST_TABS_SCRIPT } from './scripts'
+import {
+  activatePageScript,
+  LIST_TABS_SCRIPT,
+  setViewportScript,
+} from './scripts'
 import type {
   BrowserOsClientOptions,
   CaptureFrameOptions,
@@ -24,6 +28,7 @@ import type {
   RemoteTab,
   RequestOptions,
   ScrollOptions,
+  SetViewportRequest,
   ViewportMetrics,
 } from './types'
 
@@ -33,6 +38,8 @@ const DEFAULT_CAPTURE_WIDTH = 1024
 const DEFAULT_CAPTURE_HEIGHT = 768
 const MAX_CAPTURE_WIDTH = 1440
 const MAX_CAPTURE_HEIGHT = 900
+const MAX_VIEWPORT_DIMENSION = 10_000_000
+const MAX_DEVICE_SCALE_FACTOR = 10
 const REQUIRED_TOOLS = ['tabs', 'navigate', 'screenshot', 'act', 'run'] as const
 
 interface InitializeResult {
@@ -313,6 +320,18 @@ function validateCaptureDimension(
   }
 }
 
+function validateViewportDimension(value: number, name: string): void {
+  if (
+    !Number.isInteger(value) ||
+    value < 1 ||
+    value > MAX_VIEWPORT_DIMENSION
+  ) {
+    throw validationError(
+      `${name} must be an integer between 1 and ${MAX_VIEWPORT_DIMENSION}`,
+    )
+  }
+}
+
 function findImage(result: McpToolResult): McpImageContent | undefined {
   if (!Array.isArray(result.content)) return undefined
   return result.content.find(
@@ -514,6 +533,59 @@ export class BrowserOsClient {
       throw validationError('navigate URL is only valid for the url action')
     }
     await this.callTool('navigate', { action: request.action, page: pageId }, options)
+  }
+
+  async setViewport(
+    pageId: number,
+    request: SetViewportRequest,
+    options: RequestOptions = {},
+  ): Promise<ViewportMetrics> {
+    this.assertPage(pageId)
+    if (!isRecordValue(request)) {
+      throw validationError('set viewport request is required')
+    }
+    validateViewportDimension(request.width, 'width')
+    validateViewportDimension(request.height, 'height')
+    assertFiniteNumber(request.deviceScaleFactor, 'deviceScaleFactor')
+    if (
+      request.deviceScaleFactor <= 0 ||
+      request.deviceScaleFactor > MAX_DEVICE_SCALE_FACTOR
+    ) {
+      throw validationError(
+        `deviceScaleFactor must be greater than 0 and at most ${MAX_DEVICE_SCALE_FACTOR}`,
+      )
+    }
+
+    const result = await this.callTool(
+      'run',
+      {
+        code: setViewportScript(
+          pageId,
+          request.width,
+          request.height,
+          request.deviceScaleFactor,
+        ),
+      },
+      options,
+    )
+    const value = ensureRunValue(
+      result,
+      `Setting viewport for BrowserOS page ${pageId}`,
+    )
+    if (!isRecordValue(value) || value.pageId !== pageId) {
+      throw new McpCallError(
+        `BrowserOS returned invalid viewport data for page ${pageId}`,
+        { kind: 'protocol', data: value },
+      )
+    }
+    const viewport = parseViewport(value.metrics)
+    if (!viewport) {
+      throw new McpCallError(
+        `BrowserOS returned invalid viewport metrics for page ${pageId}`,
+        { kind: 'protocol', data: value },
+      )
+    }
+    return viewport
   }
 
   async captureFrame(

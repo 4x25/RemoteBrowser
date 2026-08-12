@@ -98,6 +98,12 @@ export interface NavigateRequest {
   url?: string
 }
 
+export interface SetViewportRequest {
+  width: number
+  height: number
+  deviceScaleFactor: number
+}
+
 export interface CaptureFrameOptions extends RequestOptions {
   width?: number
   height?: number

@@ -94,6 +94,7 @@ export function App() {
         }))}
         activeTabId={browser.activePageId}
         busy={browser.syncingTabs}
+        creating={browser.creatingTab}
         disabled={connectionStatus !== 'connected'}
         onSelect={(tabId) => void browser.selectTab(Number(tabId))}
         onClose={(tabId) => void browser.closeTab(Number(tabId))}

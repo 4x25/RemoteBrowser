@@ -10,12 +10,14 @@ import {
   type RemotePoint,
   type RemoteTab,
   type ScrollDirection,
+  type ViewportMetrics,
 } from '../lib/browseros'
 import {
   base64ToBlob,
   waitForImageDecode,
   type CaptureSize,
 } from '../lib/frame'
+import { FrameCache } from '../lib/frameCache'
 
 export type ViewportPhase =
   | 'empty'
@@ -30,8 +32,23 @@ export interface DisplayFrame {
   objectUrl: string
   naturalWidth: number
   naturalHeight: number
+  viewportWidth: number
+  viewportHeight: number
   capturedAt: number
   mimeType: string
+}
+
+interface AppliedViewport {
+  client: BrowserOsClient
+  width: number
+  height: number
+  deviceScaleFactor: number
+  metrics: ViewportMetrics
+}
+
+interface CapturedFrame {
+  encoded: RemoteFrame
+  viewport: ViewportMetrics
 }
 
 interface RemoteBrowserState {
@@ -42,6 +59,7 @@ interface RemoteBrowserState {
   tabs: RemoteTab[]
   activePageId: number | null
   syncingTabs: boolean
+  creatingTab: boolean
   navigating: boolean
   closingPageIds: number[]
   frame: DisplayFrame | null
@@ -62,7 +80,12 @@ type StateAction =
   | { type: 'disconnected' }
   | { type: 'syncingTabs'; value: boolean }
   | { type: 'tabs'; tabs: RemoteTab[] }
-  | { type: 'activePage'; pageId: number | null }
+  | {
+      type: 'activePage'
+      pageId: number | null
+      frame: DisplayFrame | null
+    }
+  | { type: 'creatingTab'; value: boolean }
   | { type: 'navigating'; value: boolean }
   | { type: 'closing'; pageId: number; value: boolean }
   | { type: 'frameLoading' }
@@ -77,6 +100,7 @@ const initialState: RemoteBrowserState = {
   tabs: [],
   activePageId: null,
   syncingTabs: false,
+  creatingTab: false,
   navigating: false,
   closingPageIds: [],
   frame: null,
@@ -105,6 +129,7 @@ function reducer(
         connectionError: null,
         tabs: action.tabs,
         activePageId: action.activePageId,
+        frame: null,
         viewportPhase: action.activePageId === null ? 'empty' : 'loading',
       }
     case 'connectionError':
@@ -125,10 +150,14 @@ function reducer(
       return {
         ...state,
         activePageId: action.pageId,
-        frame: null,
-        viewportPhase: action.pageId === null ? 'empty' : 'loading',
+        frame: action.frame,
+        navigating: false,
+        viewportPhase:
+          action.pageId === null ? 'empty' : action.frame ? 'ready' : 'loading',
         viewportError: null,
       }
+    case 'creatingTab':
+      return { ...state, creatingTab: action.value }
     case 'navigating':
       return { ...state, navigating: action.value }
     case 'closing': {
@@ -227,11 +256,21 @@ export function useRemoteBrowser(): RemoteBrowserController {
   const stateRef = useRef(state)
   const clientRef = useRef<BrowserOsClient | null>(null)
   const lifecycleRef = useRef(0)
+  const captureLifecycleRef = useRef(0)
   const frameGenerationRef = useRef(0)
   const frameRequestRef = useRef(0)
-  const captureSizeRef = useRef<CaptureSize>({ width: 1024, height: 768 })
+  const tabSelectionRef = useRef(0)
+  const navigationGenerationRef = useRef(0)
+  const tabActivationQueueRef = useRef<Promise<void>>(Promise.resolve())
+  const captureSizeRef = useRef<CaptureSize>({
+    width: 1024,
+    height: 768,
+    viewportWidth: 1024,
+    viewportHeight: 768,
+    deviceScaleFactor: 1,
+  })
   const captureTimerRef = useRef<number | null>(null)
-  const captureInFlightRef = useRef(false)
+  const captureInFlightRef = useRef<number | null>(null)
   const captureRequestedRef = useRef(false)
   const lastCaptureStartRef = useRef(0)
   const captureRunnerRef = useRef<() => Promise<void>>(async () => undefined)
@@ -240,15 +279,26 @@ export function useRemoteBrowser(): RemoteBrowserController {
   const pageQueuesRef = useRef(new Map<number, Promise<void>>())
   const pendingHoverRef = useRef(new Map<number, RemotePoint>())
   const hoverScheduledRef = useRef(new Set<number>())
+  const appliedViewportsRef = useRef(new Map<number, AppliedViewport>())
+  const frameCacheRef = useRef<FrameCache<DisplayFrame> | null>(null)
+  if (!frameCacheRef.current) frameCacheRef.current = new FrameCache()
 
   const send = useCallback((action: StateAction) => {
     stateRef.current = reducer(stateRef.current, action)
     reactDispatch(action)
   }, [])
 
-  const revokeFrame = useCallback(() => {
-    const frame = stateRef.current.frame
-    if (frame) URL.revokeObjectURL(frame.objectUrl)
+  const clearFrameCache = useCallback(() => {
+    frameCacheRef.current?.clear()
+  }, [])
+
+  const retainFrameCache = useCallback((tabs: RemoteTab[]) => {
+    const pageIds = tabs.map((tab) => tab.pageId)
+    const retained = new Set(pageIds)
+    frameCacheRef.current?.retain(pageIds)
+    for (const pageId of appliedViewportsRef.current.keys()) {
+      if (!retained.has(pageId)) appliedViewportsRef.current.delete(pageId)
+    }
   }, [])
 
   const clearTimers = useCallback(() => {
@@ -262,14 +312,18 @@ export function useRemoteBrowser(): RemoteBrowserController {
     }
   }, [])
 
-  const invalidateFrame = useCallback(
+  const switchActivePage = useCallback(
     (pageId: number | null) => {
       frameGenerationRef.current += 1
+      navigationGenerationRef.current += 1
       captureRequestedRef.current = false
-      revokeFrame()
-      send({ type: 'activePage', pageId })
+      send({
+        type: 'activePage',
+        pageId,
+        frame: pageId === null ? null : frameCacheRef.current?.get(pageId) ?? null,
+      })
     },
-    [revokeFrame, send],
+    [send],
   )
 
   const scheduleCapture = useCallback((immediate = false) => {
@@ -282,7 +336,7 @@ export function useRemoteBrowser(): RemoteBrowserController {
       return
     }
 
-    if (captureInFlightRef.current) {
+    if (captureInFlightRef.current !== null) {
       captureRequestedRef.current = true
       return
     }
@@ -300,11 +354,24 @@ export function useRemoteBrowser(): RemoteBrowserController {
   }, [])
 
   const loadTabs = useCallback(
-    async (preferredPageId?: number | null): Promise<RemoteTab[]> => {
+    async (
+      preferredPageId?: number | null,
+      selection?: number,
+    ): Promise<RemoteTab[]> => {
       const client = clientRef.current
       if (!client || client.state !== 'connected') return []
+      const lifecycle = lifecycleRef.current
 
       const tabs = await client.listTabs()
+      if (
+        client !== clientRef.current ||
+        lifecycle !== lifecycleRef.current
+      ) {
+        return stateRef.current.tabs
+      }
+      if (selection !== undefined && selection !== tabSelectionRef.current) {
+        return tabs
+      }
       const currentPageId = stateRef.current.activePageId
       const nextPageId = choosePageId(
         tabs,
@@ -313,16 +380,19 @@ export function useRemoteBrowser(): RemoteBrowserController {
       send({ type: 'tabs', tabs })
 
       if (nextPageId !== currentPageId) {
-        invalidateFrame(nextPageId)
+        switchActivePage(nextPageId)
         scheduleCapture(true)
       }
+      retainFrameCache(tabs)
       return tabs
     },
-    [invalidateFrame, scheduleCapture, send],
+    [retainFrameCache, scheduleCapture, send, switchActivePage],
   )
 
   const refreshTabs = useCallback(async (): Promise<RemoteTab[]> => {
+    if (stateRef.current.creatingTab) return stateRef.current.tabs
     if (tabSyncPromiseRef.current) return tabSyncPromiseRef.current
+    const lifecycle = lifecycleRef.current
     send({ type: 'syncingTabs', value: true })
     const request = (async () => {
       try {
@@ -334,39 +404,78 @@ export function useRemoteBrowser(): RemoteBrowserController {
         }
         return tabs
       } catch (error) {
-        if (!(error instanceof McpCallError && error.kind === 'aborted')) {
+        if (
+          lifecycle === lifecycleRef.current &&
+          !(error instanceof McpCallError && error.kind === 'aborted')
+        ) {
           send({ type: 'frameFailed', error: describeError(error) })
         }
         return stateRef.current.tabs
       } finally {
-        tabSyncPromiseRef.current = null
-        send({ type: 'syncingTabs', value: false })
+        if (lifecycle === lifecycleRef.current) {
+          send({ type: 'syncingTabs', value: false })
+        }
       }
     })()
     tabSyncPromiseRef.current = request
+    void request.finally(() => {
+      if (
+        lifecycle === lifecycleRef.current &&
+        tabSyncPromiseRef.current === request
+      ) {
+        tabSyncPromiseRef.current = null
+      }
+    })
     return request
   }, [loadTabs, send])
 
   const captureEncodedFrame = useCallback(
-    async (client: BrowserOsClient, pageId: number): Promise<RemoteFrame> => {
+    async (client: BrowserOsClient, pageId: number): Promise<CapturedFrame> => {
       const size = captureSizeRef.current
+      const previous = appliedViewportsRef.current.get(pageId)
+      let viewport: ViewportMetrics
+      if (
+        !previous ||
+        previous.client !== client ||
+        previous.width !== size.viewportWidth ||
+        previous.height !== size.viewportHeight ||
+        previous.deviceScaleFactor !== size.deviceScaleFactor
+      ) {
+        viewport = await client.setViewport(pageId, {
+          width: size.viewportWidth,
+          height: size.viewportHeight,
+          deviceScaleFactor: size.deviceScaleFactor,
+        })
+        appliedViewportsRef.current.set(pageId, {
+          client,
+          width: size.viewportWidth,
+          height: size.viewportHeight,
+          deviceScaleFactor: size.deviceScaleFactor,
+          metrics: viewport,
+        })
+      } else {
+        viewport = previous.metrics
+      }
+
       try {
-        return await client.captureFrame(pageId, {
+        const encoded = await client.captureFrame(pageId, {
           ...size,
           format: 'webp',
           quality: 70,
           timeoutMs: 20_000,
         })
+        return { encoded, viewport }
       } catch (firstError) {
         if (firstError instanceof McpCallError && firstError.kind === 'aborted') {
           throw firstError
         }
-        return client.captureFrame(pageId, {
+        const encoded = await client.captureFrame(pageId, {
           ...size,
           format: 'jpeg',
           quality: 75,
           timeoutMs: 20_000,
         })
+        return { encoded, viewport }
       }
     },
     [],
@@ -378,23 +487,25 @@ export function useRemoteBrowser(): RemoteBrowserController {
     const pageId = current.activePageId
     if (!client || client.state !== 'connected' || pageId === null) return
 
-    captureInFlightRef.current = true
     captureRequestedRef.current = false
     lastCaptureStartRef.current = Date.now()
     const generation = frameGenerationRef.current
     const lifecycle = lifecycleRef.current
+    const captureLifecycle = captureLifecycleRef.current
     const sequence = ++frameRequestRef.current
+    captureInFlightRef.current = sequence
     send({ type: 'frameLoading' })
 
     let candidateUrl: string | null = null
     try {
-      const encoded = await captureEncodedFrame(client, pageId)
+      const { encoded, viewport } = await captureEncodedFrame(client, pageId)
       const blob = base64ToBlob(encoded)
       candidateUrl = URL.createObjectURL(blob)
       const decoded = await waitForImageDecode(candidateUrl)
       const latest = stateRef.current
       const isCurrent =
         lifecycle === lifecycleRef.current &&
+        captureLifecycle === captureLifecycleRef.current &&
         generation === frameGenerationRef.current &&
         sequence === frameRequestRef.current &&
         latest.activePageId === pageId
@@ -405,18 +516,19 @@ export function useRemoteBrowser(): RemoteBrowserController {
         return
       }
 
-      const previousFrame = latest.frame
       const frame: DisplayFrame = {
         pageId,
         objectUrl: candidateUrl,
         naturalWidth: decoded.width || encoded.width,
         naturalHeight: decoded.height || encoded.height,
+        viewportWidth: viewport.width,
+        viewportHeight: viewport.height,
         capturedAt: encoded.capturedAt,
         mimeType: encoded.mimeType,
       }
       candidateUrl = null
+      frameCacheRef.current?.replace(frame)
       send({ type: 'frameReady', frame })
-      if (previousFrame) URL.revokeObjectURL(previousFrame.objectUrl)
     } catch (error) {
       if (candidateUrl) URL.revokeObjectURL(candidateUrl)
       if (
@@ -428,7 +540,13 @@ export function useRemoteBrowser(): RemoteBrowserController {
         send({ type: 'frameFailed', error: describeError(error) })
       }
     } finally {
-      captureInFlightRef.current = false
+      if (
+        captureLifecycle !== captureLifecycleRef.current ||
+        captureInFlightRef.current !== sequence
+      ) {
+        return
+      }
+      captureInFlightRef.current = null
       if (captureRequestedRef.current) scheduleCapture(true)
       else scheduleCapture(false)
     }
@@ -438,19 +556,24 @@ export function useRemoteBrowser(): RemoteBrowserController {
 
   const disconnect = useCallback(() => {
     lifecycleRef.current += 1
+    captureLifecycleRef.current += 1
+    tabSelectionRef.current += 1
+    navigationGenerationRef.current += 1
     frameGenerationRef.current += 1
     clearTimers()
     clientRef.current?.disconnect()
     clientRef.current = null
     tabSyncPromiseRef.current = null
-    captureInFlightRef.current = false
+    captureInFlightRef.current = null
     captureRequestedRef.current = false
     pageQueuesRef.current.clear()
+    tabActivationQueueRef.current = Promise.resolve()
     pendingHoverRef.current.clear()
     hoverScheduledRef.current.clear()
-    revokeFrame()
+    appliedViewportsRef.current.clear()
+    clearFrameCache()
     send({ type: 'disconnected' })
-  }, [clearTimers, revokeFrame, send])
+  }, [clearFrameCache, clearTimers, send])
 
   const connect = useCallback(
     async (input: string): Promise<boolean> => {
@@ -467,10 +590,21 @@ export function useRemoteBrowser(): RemoteBrowserController {
       }
 
       lifecycleRef.current += 1
+      captureLifecycleRef.current += 1
+      tabSelectionRef.current += 1
+      navigationGenerationRef.current += 1
       const lifecycle = lifecycleRef.current
       clearTimers()
       clientRef.current?.disconnect()
-      revokeFrame()
+      tabSyncPromiseRef.current = null
+      captureInFlightRef.current = null
+      captureRequestedRef.current = false
+      pageQueuesRef.current.clear()
+      tabActivationQueueRef.current = Promise.resolve()
+      pendingHoverRef.current.clear()
+      hoverScheduledRef.current.clear()
+      appliedViewportsRef.current.clear()
+      clearFrameCache()
       frameGenerationRef.current += 1
       send({ type: 'connecting', endpoint })
 
@@ -509,7 +643,7 @@ export function useRemoteBrowser(): RemoteBrowserController {
         return false
       }
     },
-    [clearTimers, revokeFrame, scheduleCapture, send],
+    [clearFrameCache, clearTimers, scheduleCapture, send],
   )
 
   const enqueuePageAction = useCallback(
@@ -542,37 +676,109 @@ export function useRemoteBrowser(): RemoteBrowserController {
     [],
   )
 
+  const enqueueTabActivation = useCallback(
+    (pageId: number, selection: number) => {
+      const previous = tabActivationQueueRef.current
+      const next = previous.catch(() => undefined).then(async () => {
+        if (selection !== tabSelectionRef.current) return
+        const client = clientRef.current
+        if (!client || client.state !== 'connected') {
+          throw new McpCallError('BrowserOS MCP is not connected', {
+            kind: 'connection',
+          })
+        }
+        await client.activateTab(pageId)
+      })
+      tabActivationQueueRef.current = next
+      return next
+    },
+    [],
+  )
+
   const selectTab = useCallback(
     async (pageId: number) => {
       if (pageId === stateRef.current.activePageId) return
       if (!stateRef.current.tabs.some((tab) => tab.pageId === pageId)) return
-      invalidateFrame(pageId)
+      const selection = ++tabSelectionRef.current
+      switchActivePage(pageId)
       try {
-        await enqueuePageAction(pageId, (client) => client.activateTab(pageId))
-        await loadTabs(pageId)
+        await enqueueTabActivation(pageId, selection)
+        if (selection !== tabSelectionRef.current) return
+        await loadTabs(pageId, selection)
+        if (selection !== tabSelectionRef.current) return
         scheduleCapture(true)
       } catch (error) {
-        send({ type: 'frameFailed', error: describeError(error) })
+        if (selection === tabSelectionRef.current) {
+          send({ type: 'frameFailed', error: describeError(error) })
+        }
       }
     },
-    [enqueuePageAction, invalidateFrame, loadTabs, scheduleCapture, send],
+    [enqueueTabActivation, loadTabs, scheduleCapture, send, switchActivePage],
   )
 
   const createTab = useCallback(async () => {
     const client = clientRef.current
-    if (!client || client.state !== 'connected') return
-    const previousIds = new Set(stateRef.current.tabs.map((tab) => tab.pageId))
+    if (
+      !client ||
+      client.state !== 'connected' ||
+      stateRef.current.creatingTab
+    ) {
+      return
+    }
+    const lifecycle = lifecycleRef.current
+    const selection = ++tabSelectionRef.current
+    const pendingSync = tabSyncPromiseRef.current
+    send({ type: 'creatingTab', value: true })
     try {
-      await client.createTab('about:blank')
+      const previousIds = new Set(
+        stateRef.current.tabs.map((tab) => tab.pageId),
+      )
+      const createRequest = tabActivationQueueRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          if (pendingSync) await pendingSync
+          if (
+            lifecycle !== lifecycleRef.current ||
+            client !== clientRef.current ||
+            client.state !== 'connected'
+          ) {
+            throw new McpCallError('BrowserOS MCP is not connected', {
+              kind: 'connection',
+            })
+          }
+          await client.createTab('about:blank')
+        })
+      tabActivationQueueRef.current = createRequest
+      await createRequest
+      if (
+        lifecycle !== lifecycleRef.current ||
+        client !== clientRef.current ||
+        selection !== tabSelectionRef.current
+      ) {
+        return
+      }
       const tabs = await client.listTabs()
+      if (
+        lifecycle !== lifecycleRef.current ||
+        selection !== tabSelectionRef.current
+      ) {
+        return
+      }
       const created = tabs.find((tab) => !previousIds.has(tab.pageId))
       send({ type: 'tabs', tabs })
-      invalidateFrame(created?.pageId ?? choosePageId(tabs))
+      switchActivePage(created?.pageId ?? choosePageId(tabs))
+      retainFrameCache(tabs)
       scheduleCapture(true)
     } catch (error) {
-      send({ type: 'frameFailed', error: describeError(error) })
+      if (lifecycle === lifecycleRef.current) {
+        send({ type: 'frameFailed', error: describeError(error) })
+      }
+    } finally {
+      if (lifecycle === lifecycleRef.current) {
+        send({ type: 'creatingTab', value: false })
+      }
     }
-  }, [invalidateFrame, scheduleCapture, send])
+  }, [retainFrameCache, scheduleCapture, send, switchActivePage])
 
   const closeTab = useCallback(
     async (pageId: number) => {
@@ -580,7 +786,6 @@ export function useRemoteBrowser(): RemoteBrowserController {
       if (!client || client.state !== 'connected') return
       const oldTabs = stateRef.current.tabs
       const oldIndex = oldTabs.findIndex((tab) => tab.pageId === pageId)
-      const wasActive = stateRef.current.activePageId === pageId
       send({ type: 'closing', pageId, value: true })
       try {
         await client.closeTab(pageId)
@@ -590,13 +795,18 @@ export function useRemoteBrowser(): RemoteBrowserController {
           tabs = await client.listTabs()
         }
         const neighbor = tabs[Math.min(Math.max(oldIndex, 0), tabs.length - 1)]
-        const preferred = wasActive
-          ? neighbor?.pageId
-          : stateRef.current.activePageId
+        const currentPageId = stateRef.current.activePageId
+        const preferred =
+          currentPageId === pageId ||
+          !tabs.some((tab) => tab.pageId === currentPageId)
+            ? neighbor?.pageId
+            : currentPageId
         send({ type: 'tabs', tabs })
-        if (wasActive || !tabs.some((tab) => tab.pageId === preferred)) {
-          invalidateFrame(choosePageId(tabs, preferred))
+        if (preferred !== currentPageId) {
+          tabSelectionRef.current += 1
+          switchActivePage(choosePageId(tabs, preferred))
         }
+        retainFrameCache(tabs)
         scheduleCapture(true)
       } catch (error) {
         send({ type: 'frameFailed', error: describeError(error) })
@@ -604,26 +814,52 @@ export function useRemoteBrowser(): RemoteBrowserController {
         send({ type: 'closing', pageId, value: false })
       }
     },
-    [invalidateFrame, scheduleCapture, send],
+    [retainFrameCache, scheduleCapture, send, switchActivePage],
   )
 
   const navigate = useCallback(
     async (action: NavigationAction, url?: string) => {
       const pageId = stateRef.current.activePageId
       if (pageId === null) return
+      const selection = tabSelectionRef.current
+      const navigation = ++navigationGenerationRef.current
       frameGenerationRef.current += 1
       send({ type: 'navigating', value: true })
       try {
         await enqueuePageAction(pageId, (client) =>
           client.navigate(pageId, action === 'url' ? { action, url } : { action }),
         )
-        await loadTabs(pageId)
+        if (
+          navigation !== navigationGenerationRef.current ||
+          selection !== tabSelectionRef.current ||
+          stateRef.current.activePageId !== pageId
+        ) {
+          return
+        }
+        await loadTabs(pageId, selection)
+        if (
+          navigation !== navigationGenerationRef.current ||
+          stateRef.current.activePageId !== pageId
+        ) {
+          return
+        }
         scheduleCapture(true)
       } catch (error) {
+        if (
+          navigation !== navigationGenerationRef.current ||
+          stateRef.current.activePageId !== pageId
+        ) {
+          return
+        }
         send({ type: 'frameFailed', error: describeError(error) })
         throw error
       } finally {
-        send({ type: 'navigating', value: false })
+        if (
+          navigation === navigationGenerationRef.current &&
+          stateRef.current.activePageId === pageId
+        ) {
+          send({ type: 'navigating', value: false })
+        }
       }
     },
     [enqueuePageAction, loadTabs, scheduleCapture, send],
@@ -711,11 +947,15 @@ export function useRemoteBrowser(): RemoteBrowserController {
     (size: CaptureSize) => {
       if (
         size.width === captureSizeRef.current.width &&
-        size.height === captureSizeRef.current.height
+        size.height === captureSizeRef.current.height &&
+        size.viewportWidth === captureSizeRef.current.viewportWidth &&
+        size.viewportHeight === captureSizeRef.current.viewportHeight &&
+        size.deviceScaleFactor === captureSizeRef.current.deviceScaleFactor
       ) {
         return
       }
       captureSizeRef.current = size
+      frameGenerationRef.current += 1
       scheduleCapture(true)
     },
     [scheduleCapture],
@@ -759,12 +999,14 @@ export function useRemoteBrowser(): RemoteBrowserController {
   useEffect(
     () => () => {
       lifecycleRef.current += 1
+      captureLifecycleRef.current += 1
+      navigationGenerationRef.current += 1
       clearTimers()
       clientRef.current?.disconnect()
-      const frame = stateRef.current.frame
-      if (frame) URL.revokeObjectURL(frame.objectUrl)
+      appliedViewportsRef.current.clear()
+      clearFrameCache()
     },
-    [clearTimers],
+    [clearFrameCache, clearTimers],
   )
 
   const activeTab =

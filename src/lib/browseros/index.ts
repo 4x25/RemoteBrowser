@@ -21,5 +21,6 @@ export type {
   ScreenshotFormat,
   ScrollDirection,
   ScrollOptions,
+  SetViewportRequest,
   ViewportMetrics,
 } from './types'

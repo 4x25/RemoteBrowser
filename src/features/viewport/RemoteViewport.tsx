@@ -1,7 +1,6 @@
 import {
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
   type ClipboardEvent,
@@ -58,11 +57,6 @@ interface PointerStart {
   pointerId: number
 }
 
-interface ContainerSize {
-  width: number
-  height: number
-}
-
 export function RemoteViewport({
   frame,
   phase,
@@ -93,10 +87,6 @@ export function RemoteViewport({
   const composingRef = useRef(false)
   const pendingCompositionRef = useRef<string | null>(null)
   const compositionTimerRef = useRef<number | null>(null)
-  const [containerSize, setContainerSize] = useState<ContainerSize>({
-    width: 0,
-    height: 0,
-  })
   const [dragging, setDragging] = useState(false)
   const [cursor, setCursor] = useState<Point | null>(null)
 
@@ -105,56 +95,51 @@ export function RemoteViewport({
     if (!element) return
 
     const update = (width: number, height: number) => {
-      const next = { width: Math.max(0, width), height: Math.max(0, height) }
-      setContainerSize(next)
-      if (next.width > 0 && next.height > 0) {
+      if (width > 0 && height > 0) {
         onCaptureSizeChange(
-          computeCaptureSize(next.width, next.height, window.devicePixelRatio),
+          computeCaptureSize(width, height, window.devicePixelRatio),
         )
       }
     }
 
-    const rect = element.getBoundingClientRect()
-    update(rect.width, rect.height)
+    const updateFromElement = () => {
+      const rect = element.getBoundingClientRect()
+      update(rect.width, rect.height)
+    }
+
+    updateFromElement()
     const observer = new ResizeObserver((entries) => {
       const entry = entries[0]
       if (entry) update(entry.contentRect.width, entry.contentRect.height)
     })
     observer.observe(element)
-    return () => observer.disconnect()
+    window.addEventListener('resize', updateFromElement)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', updateFromElement)
+    }
   }, [onCaptureSizeChange])
-
-  const stageSize = useMemo(() => {
-    if (
-      !frame ||
-      frame.naturalWidth <= 0 ||
-      frame.naturalHeight <= 0 ||
-      containerSize.width <= 0 ||
-      containerSize.height <= 0
-    ) {
-      return null
-    }
-    const scale = Math.min(
-      containerSize.width / frame.naturalWidth,
-      containerSize.height / frame.naturalHeight,
-    )
-    return {
-      width: Math.max(1, Math.floor(frame.naturalWidth * scale)),
-      height: Math.max(1, Math.floor(frame.naturalHeight * scale)),
-    }
-  }, [containerSize, frame])
 
   const mapPoint = useCallback(
     (clientX: number, clientY: number) => {
       const stage = stageRef.current
-      if (!stage || !viewport) return null
+      if (!stage) return null
+      const capturedViewport =
+        frame &&
+        Number.isFinite(frame.viewportWidth) &&
+        frame.viewportWidth > 0 &&
+        Number.isFinite(frame.viewportHeight) &&
+        frame.viewportHeight > 0
+          ? { width: frame.viewportWidth, height: frame.viewportHeight }
+          : viewport
+      if (!capturedViewport) return null
       return mapClientPointToRemote(
         { x: clientX, y: clientY },
         stage.getBoundingClientRect(),
-        { width: viewport.width, height: viewport.height },
+        capturedViewport,
       )
     },
-    [viewport],
+    [frame, viewport],
   )
 
   const focusKeyboard = () => {
@@ -395,9 +380,9 @@ export function RemoteViewport({
     }
   }, [frame?.pageId])
 
-  const showStage = frame && stageSize
+  const showStage = frame
   const statusState =
-    frame && stageSize ? (phase === 'loading' ? 'ready' : phase) : phase
+    frame ? (phase === 'loading' ? 'ready' : phase) : phase
 
   return (
     <main
@@ -410,7 +395,6 @@ export function RemoteViewport({
         <div
           ref={stageRef}
           className="rb-viewport__stage"
-          style={{ width: stageSize.width, height: stageSize.height }}
         >
           <img
             className="rb-viewport__image"

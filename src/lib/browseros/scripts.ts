@@ -21,3 +21,21 @@ return result;`
 export function activatePageScript(pageId: number): string {
   return `await browser.cdpJsonForPage(${pageId}, "Page.bringToFront", "{}");\nreturn { pageId: ${pageId} };`
 }
+
+export function setViewportScript(
+  pageId: number,
+  width: number,
+  height: number,
+  deviceScaleFactor: number,
+): string {
+  const override = JSON.stringify({
+    width,
+    height,
+    deviceScaleFactor,
+    mobile: false,
+    screenWidth: width,
+    screenHeight: height,
+  })
+
+  return `await browser.cdpJsonForPage(${pageId}, "Emulation.setDeviceMetricsOverride", ${JSON.stringify(override)});\nconst metrics = await browser.cdpJsonForPage(${pageId}, "Page.getLayoutMetrics", "{}");\nreturn { pageId: ${pageId}, metrics };`
+}

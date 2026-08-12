@@ -3,6 +3,8 @@ import { createServer } from 'node:http'
 const PORT = 4174
 const WEBP_1X1 =
   'UklGRkoAAABXRUJQVlA4ID4AAADQAwCdASoBAAEAAUAmJZQCdAEO/gHCAPpE7w1qj8H/C5vW7aXZgr7MtxdXHT/4yP+fyG/uvbQAAAA='
+const NEW_TAB_DELAY_MS = 250
+const SCREENSHOT_DELAY_MS = 350
 
 let nextPageId = 102
 let events = []
@@ -67,6 +69,10 @@ function json(response, status, value, origin) {
   response.end(body)
 }
 
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds))
+}
+
 function rpcResult(id, result) {
   return { jsonrpc: '2.0', id, result }
 }
@@ -75,10 +81,73 @@ function activate(pageId) {
   pages = pages.map((page) => ({ ...page, isActive: page.pageId === pageId }))
 }
 
-function toolCall(name, args) {
+function parseViewportOverride(code) {
+  const match = code.match(
+    /cdpJsonForPage\(\s*(\d+)\s*,\s*["']Emulation\.setDeviceMetricsOverride["']\s*,\s*("(?:\\.|[^"\\])*")\s*\)/,
+  )
+  if (!match) return null
+
+  try {
+    const pageId = Number(match[1])
+    const parameters = JSON.parse(JSON.parse(match[2]))
+    if (
+      !Number.isInteger(pageId) ||
+      !Number.isInteger(parameters.width) ||
+      !Number.isInteger(parameters.height) ||
+      typeof parameters.deviceScaleFactor !== 'number'
+    ) {
+      return null
+    }
+    return { pageId, parameters }
+  } catch {
+    return null
+  }
+}
+
+async function toolCall(name, args) {
   if (name === 'run') {
-    if (String(args.code).includes('Page.bringToFront')) {
-      const pageId = Number(String(args.code).match(/cdpJsonForPage\((\d+)/)?.[1])
+    const code = String(args.code)
+    const viewportOverride = parseViewportOverride(code)
+    if (viewportOverride) {
+      const { pageId, parameters } = viewportOverride
+      const page = pages.find((candidate) => candidate.pageId === pageId)
+      if (!page) {
+        return {
+          isError: true,
+          content: [{ type: 'text', text: `missing page ${pageId}` }],
+        }
+      }
+
+      page.metrics = {
+        ...page.metrics,
+        cssVisualViewport: {
+          ...page.metrics.cssVisualViewport,
+          clientWidth: parameters.width,
+          clientHeight: parameters.height,
+        },
+        cssContentSize: {
+          width: parameters.width,
+          height: Math.max(parameters.height, page.metrics.cssContentSize.height),
+        },
+      }
+      events.push({
+        kind: 'set_viewport',
+        page: pageId,
+        ...parameters,
+        receivedAt: Date.now(),
+      })
+      return {
+        content: [{ type: 'text', text: 'ok' }],
+        structuredContent: {
+          ok: true,
+          value: { pageId, metrics: page.metrics },
+          logs: [],
+        },
+      }
+    }
+
+    if (code.includes('Page.bringToFront')) {
+      const pageId = Number(code.match(/cdpJsonForPage\((\d+)/)?.[1])
       activate(pageId)
       return {
         content: [{ type: 'text', text: 'ok' }],
@@ -93,6 +162,7 @@ function toolCall(name, args) {
 
   if (name === 'tabs') {
     if (args.action === 'new') {
+      await delay(NEW_TAB_DELAY_MS)
       const pageId = nextPageId++
       activate(-1)
       pages.push(createPage(pageId, args.url || 'about:blank', '新标签页', true))
@@ -135,6 +205,13 @@ function toolCall(name, args) {
   }
 
   if (name === 'screenshot') {
+    events.push({
+      kind: 'screenshot',
+      page: args.page,
+      args: { ...args, size: args.size ? { ...args.size } : undefined },
+      receivedAt: Date.now(),
+    })
+    await delay(SCREENSHOT_DELAY_MS)
     return {
       content: [{ type: 'image', mimeType: 'image/webp', data: WEBP_1X1 }],
     }
@@ -163,6 +240,13 @@ const server = createServer((request, response) => {
     json(response, 200, events, origin)
     return
   }
+  if (request.url === '/reset' && request.method === 'POST') {
+    nextPageId = 102
+    events = []
+    pages = [createPage(101, 'https://example.com/', 'Example Domain', true)]
+    json(response, 200, { status: 'reset' }, origin)
+    return
+  }
   if (request.url !== '/mcp' || request.method !== 'POST') {
     json(response, 404, { error: 'not found' }, origin)
     return
@@ -173,7 +257,7 @@ const server = createServer((request, response) => {
   request.on('data', (chunk) => {
     body += chunk
   })
-  request.on('end', () => {
+  request.on('end', async () => {
     const message = JSON.parse(body)
     if (message.method === 'notifications/initialized') {
       response.writeHead(202, corsHeaders(origin))
@@ -213,7 +297,7 @@ const server = createServer((request, response) => {
         200,
         rpcResult(
           message.id,
-          toolCall(message.params.name, message.params.arguments || {}),
+          await toolCall(message.params.name, message.params.arguments || {}),
         ),
         origin,
       )
