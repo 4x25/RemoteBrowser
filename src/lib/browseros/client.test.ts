@@ -123,6 +123,61 @@ describe('BrowserOsClient connection', () => {
 })
 
 describe('BrowserOsClient tools', () => {
+  it('decodes new run results and reuses the BrowserOS session across tools', async () => {
+    const calls: Record<string, unknown>[] = []
+    const { client } = await connectedClient((body) => {
+      calls.push(body.params?.arguments as Record<string, unknown>)
+      return {
+        _meta: { 'com.browseros/session': 'session-1' },
+        structuredContent: {
+          ok: true,
+          value: '[UNTRUSTED_PAGE_CONTENT nonce=abc123 origin=run] Untrusted page content follows.\n[{"pageId":1,"title":"New tab"}]\n[END_UNTRUSTED_PAGE_CONTENT nonce=abc123]',
+        },
+      }
+    })
+
+    expect((await client.listTabs())[0]?.title).toBe('New tab')
+    await client.hover(1, { x: 10, y: 20 })
+    expect(calls[0]).not.toHaveProperty('session')
+    expect(calls[1]).toMatchObject({ kind: 'hover_at', session: 'session-1' })
+
+    client.disconnect()
+    await client.connect('http://localhost:9000/mcp')
+    await client.listTabs()
+    expect(calls[2]).not.toHaveProperty('session')
+    await client.connect('http://localhost:9001/mcp')
+    await client.listTabs()
+    expect(calls[3]).not.toHaveProperty('session')
+  })
+
+  it('discards a late tool response without restoring an old session', async () => {
+    let release: (() => void) | undefined
+    const baseFetch = makeFetch(() => ({
+      _meta: { 'com.browseros/session': 'old-session' },
+      structuredContent: { ok: true, value: [] },
+    }))
+    let delay = true
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const body = JSON.parse(String(init?.body)) as RpcBody
+      if (delay && body.method === 'tools/call') {
+        await new Promise<void>((resolve) => { release = resolve })
+      }
+      return baseFetch(input, init)
+    }
+    const client = new BrowserOsClient({ fetch: fetchImpl })
+    await client.connect('http://localhost:9000/mcp')
+    const pending = client.listTabs()
+    const rejected = expect(pending).rejects.toMatchObject({ kind: 'aborted' })
+    await client.connect('http://localhost:9001/mcp')
+    delay = false
+    release!()
+    await rejected
+    await client.listTabs()
+    const lastCall = (baseFetch as ReturnType<typeof vi.fn>).mock.calls.at(-1)
+    expect(JSON.parse(String(lastCall?.[1]?.body)).params.arguments)
+      .not.toHaveProperty('session')
+  })
+
   it('maps structured tab metadata and page state', async () => {
     const { client } = await connectedClient((body) => {
       if (body.method !== 'tools/call') return undefined

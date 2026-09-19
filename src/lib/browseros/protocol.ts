@@ -62,6 +62,25 @@ function parseJson(value: string): unknown {
   }
 }
 
+/** Decode the data envelope used by newer BrowserOS run results, never code. */
+export function parseRunValue(value: unknown): unknown {
+  if (typeof value !== 'string') return value
+
+  const normalized = value.replace(/\r\n/g, '\n')
+  const opening = /^\[UNTRUSTED_PAGE_CONTENT nonce=([a-zA-Z0-9_-]+) origin=run\][^\n]*\n/.exec(normalized)
+  const closing = opening
+    ? `\n[END_UNTRUSTED_PAGE_CONTENT nonce=${opening[1]}]`
+    : ''
+  if (!opening || !normalized.endsWith(closing)) {
+    throw new McpCallError('BrowserOS returned an invalid run data envelope', {
+      kind: 'protocol',
+    })
+  }
+
+  // Parse only the complete payload; marker-like text inside JSON stays data.
+  return parseJson(normalized.slice(opening[0].length, -closing.length))
+}
+
 /** Parse either a regular JSON response or one or more complete SSE events. */
 export function parseMcpResponse(body: string, contentType = ''): unknown[] {
   const trimmed = body.trim()

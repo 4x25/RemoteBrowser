@@ -21,7 +21,7 @@
 ## 运行条件
 
 - Node.js 20.19+ 或 22.12+
-- 支持 Streamable HTTP 的 BrowserOS MCP；当前针对 BrowserOS MCP `0.0.127` 验证
+- 支持 Streamable HTTP 的 BrowserOS MCP；兼容旧版结构化返回和新版带安全标记的数据包装，并在连接期间传递 BrowserOS 会话标识
 - 前端必须通过 HTTP(S) 提供，不能直接打开 `index.html`
 
 BrowserOS 默认只信任自身扩展来源。启动 BrowserOS 前，需要把本应用的精确 Origin 加入环境变量：
@@ -49,6 +49,8 @@ http://127.0.0.1:9000/mcp
 ```
 
 远程部署时，该地址必须能从运行前端的最终用户浏览器访问；它不是由 Vite 开发服务器代为访问的。
+
+已使用 BrowserOS MCP `0.0.165` 验证连接、标签页读取和截图。新版 `run` 返回的数据包装只按 JSON 解析，不会执行其中的内容；会话标识只保存在内存中，断开或重新连接时清除。
 
 ## 验证
 

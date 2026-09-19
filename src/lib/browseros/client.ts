@@ -3,6 +3,7 @@ import {
   assertToolResult,
   isRecordValue,
   parseMcpResponse,
+  parseRunValue,
   unwrapJsonRpcResponse,
   type JsonRpcNotification,
   type JsonRpcRequest,
@@ -454,7 +455,7 @@ function ensureRunValue(result: McpToolResult, operation: string): unknown {
       })
     }
     if (runResult.ok === true && Object.prototype.hasOwnProperty.call(runResult, 'value')) {
-      return runResult.value
+      return parseRunValue(runResult.value)
     }
   }
 
@@ -509,6 +510,7 @@ export class BrowserOsClient {
   private stateValue: ConnectionState = 'disconnected'
   private serverInfoValue: McpServerInfo | null = null
   private tools = new Set<string>()
+  private browserSession: string | null = null
 
   constructor(options: BrowserOsClientOptions = {}) {
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis)
@@ -537,6 +539,7 @@ export class BrowserOsClient {
     this.lifecycleController = new AbortController()
     this.endpointValue = normalizedEndpoint
     this.serverInfoValue = null
+    this.browserSession = null
     this.tools.clear()
     this.stateValue = 'connecting'
     const connectionLifecycle = this.lifecycleController
@@ -605,6 +608,7 @@ export class BrowserOsClient {
     this.lifecycleController = new AbortController()
     this.endpointValue = null
     this.serverInfoValue = null
+    this.browserSession = null
     this.tools.clear()
     this.stateValue = 'disconnected'
   }
@@ -962,12 +966,31 @@ export class BrowserOsClient {
         code: 'MISSING_TOOL',
       })
     }
+    const lifecycle = this.lifecycleController
     const value = await this.request(
       'tools/call',
-      { name, arguments: args },
+      {
+        name,
+        arguments: {
+          ...args,
+          ...(this.browserSession ? { session: this.browserSession } : {}),
+        },
+      },
       options,
       true,
     )
+    if (lifecycle !== this.lifecycleController || lifecycle.signal.aborted) {
+      throw new McpCallError('BrowserOS tool call was superseded', {
+        kind: 'aborted',
+        code: 'ABORTED',
+      })
+    }
+    if (isRecordValue(value) && isRecordValue(value._meta)) {
+      const session = value._meta['com.browseros/session']
+      if (typeof session === 'string' && session.length > 0) {
+        this.browserSession = session
+      }
+    }
     return assertToolResult(value, name)
   }
 

@@ -31,5 +31,5 @@ describe.runIf(Boolean(endpoint))('BrowserOS MCP real integration', () => {
     } finally {
       client.disconnect()
     }
-  })
+  }, 120_000)
 })
