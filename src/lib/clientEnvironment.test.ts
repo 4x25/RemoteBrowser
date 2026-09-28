@@ -124,7 +124,7 @@ describe('collectClientEnvironment', () => {
     })
 
     expect(environment).toEqual({
-      userAgent: 'Mozilla/5.0 (compatible; RemoteBrowserOS)',
+      userAgent: 'Mozilla/5.0 (compatible; RemoteBrowser)',
       platform: 'Unknown',
       languages: ['en-US'],
       acceptLanguage: 'en-US',

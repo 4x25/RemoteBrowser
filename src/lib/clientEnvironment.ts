@@ -259,7 +259,7 @@ export async function collectClientEnvironment(
   const userAgentMetadata = await collectUserAgentMetadata(browserNavigator)
 
   const userAgent = readString(browserNavigator, 'userAgent')
-    || 'Mozilla/5.0 (compatible; RemoteBrowserOS)'
+    || 'Mozilla/5.0 (compatible; RemoteBrowser)'
   const platform = readString(browserNavigator, 'platform') || 'Unknown'
 
   return {

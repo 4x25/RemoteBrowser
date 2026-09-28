@@ -37,7 +37,7 @@ jobs:
         run: npm test
 
       - name: Build for Pages
-        run: npm run build -- --base=/RemoteBrowserOS/
+        run: npm run build -- --base=/RemoteBrowser/
 
       - name: Configure Pages
         uses: actions/configure-pages@v5

@@ -308,7 +308,7 @@ test('forwards the local browser environment before capture and reapplies theme 
   browser,
   request,
 }) => {
-  const userAgent = 'RemoteBrowserOS-E2E/1.0'
+  const userAgent = 'RemoteBrowser-E2E/1.0'
   const remote = await connectCustomBrowserEnvironment(browser, userAgent)
 
   try {

@@ -517,7 +517,7 @@ export class BrowserOsClient {
     this.defaultTimeoutMs = options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS
     assertTimeout(this.defaultTimeoutMs)
     this.protocolVersion = options.protocolVersion ?? DEFAULT_PROTOCOL_VERSION
-    this.clientName = options.clientName ?? 'remote-browser-os'
+    this.clientName = options.clientName ?? 'remote-browser'
     this.clientVersion = options.clientVersion ?? '0.1.0'
   }
 
