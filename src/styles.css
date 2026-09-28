@@ -584,6 +584,56 @@ textarea:focus-visible,
   gap: 9px;
 }
 
+.rb-connection-dialog__transports {
+  display: grid;
+  margin: 20px 0 0;
+  padding: 14px 14px 12px;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  border: 1px solid #2c3342;
+  border-radius: 12px;
+}
+
+.rb-connection-dialog__transports legend {
+  padding: 0 6px;
+  color: #8d97a9;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.rb-connection-dialog__transport {
+  display: flex;
+  min-height: 38px;
+  padding: 0 12px;
+  align-items: center;
+  gap: 9px;
+  color: #c8cfdb;
+  background: #171b23;
+  border: 1px solid #333b4a;
+  border-radius: 9px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rb-connection-dialog__transport input {
+  accent-color: #527fe7;
+  margin: 0;
+}
+
+.rb-connection-dialog__transport--active {
+  color: #f4f6fb;
+  background: #202b49;
+  border-color: #4c6ba8;
+}
+
+.rb-connection-dialog__transports:disabled .rb-connection-dialog__transport {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .rb-connection-dialog__form label {
   color: #c8cfdb;
   font-size: 12px;

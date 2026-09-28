@@ -65,6 +65,50 @@ describe("ConnectionDialog", () => {
     fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
     expect(onCancel).toHaveBeenCalledTimes(1);
   });
+
+  it("switches between the BrowserOS MCP and CDP connection options", () => {
+    const onTransportChange = vi.fn();
+    const { rerender } = render(
+      <ConnectionDialog
+        open
+        transport="browseros"
+        endpoint=""
+        onTransportChange={onTransportChange}
+        onEndpointChange={vi.fn()}
+        onConnect={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "连接 BrowserOS" })).not.toBeNull();
+    expect(screen.getByRole("radio", { name: "BrowserOS MCP" })).toBeChecked();
+    expect(screen.getByLabelText("MCP 地址").getAttribute("placeholder")).toBe(
+      "http://127.0.0.1:9000/mcp",
+    );
+
+    fireEvent.click(screen.getByRole("radio", { name: "CDP" }));
+    expect(onTransportChange).toHaveBeenCalledWith("cdp");
+
+    rerender(
+      <ConnectionDialog
+        open
+        transport="cdp"
+        endpoint=""
+        onTransportChange={onTransportChange}
+        onEndpointChange={vi.fn()}
+        onConnect={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "连接 CDP" })).not.toBeNull();
+    expect(screen.getByRole("radio", { name: "CDP" })).toBeChecked();
+    expect(screen.getByLabelText("CDP 地址").getAttribute("placeholder")).toContain(
+      "ws://127.0.0.1:9222",
+    );
+    expect(
+      screen.getByRole("button", { name: "连接浏览器" }).closest("form")
+        ?.querySelector("input")?.getAttribute("name"),
+    ).toBe("cdp-endpoint");
+  });
 });
 
 describe("TabStrip", () => {

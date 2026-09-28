@@ -20,7 +20,7 @@ const DEFAULT_MESSAGES: Record<ViewportState, string> = {
   ready: "远程画面已同步",
   stale: "画面可能不是最新状态",
   error: "无法获取远程画面",
-  disconnected: "连接 BrowserOS 后开始浏览",
+  disconnected: "连接远程浏览器后开始浏览",
 };
 
 export function ViewportStatus({

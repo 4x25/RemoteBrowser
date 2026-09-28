@@ -8,12 +8,22 @@ import {
 import { RemoteViewport } from './features/viewport/RemoteViewport'
 import { useRemoteBrowser } from './hooks/useRemoteBrowser'
 import { tryNormalizeBrowserUrl } from './lib/interaction'
+import type { RemoteBrowserTransport } from './lib/remote'
+
+const createEmptyEndpoints = (): Record<RemoteBrowserTransport, string> => ({
+  browseros: '',
+  cdp: '',
+})
 
 export function App() {
   const browser = useRemoteBrowser()
   const [dialogOpen, setDialogOpen] = useState(true)
   const [dialogMode, setDialogMode] = useState<'initial' | 'reconnect'>('initial')
-  const [endpointInput, setEndpointInput] = useState('')
+  const [transportInput, setTransportInput] = useState<RemoteBrowserTransport>(
+    'browseros',
+  )
+  const [endpointInputs, setEndpointInputs] =
+    useState<Record<RemoteBrowserTransport, string>>(createEmptyEndpoints)
   const [address, setAddress] = useState('')
   const [addressDirty, setAddressDirty] = useState(false)
   const [addressError, setAddressError] = useState<string | null>(null)
@@ -39,19 +49,33 @@ export function App() {
   ])
 
   const handleConnect = async (endpoint: string) => {
-    const connected = await browser.connect(endpoint)
+    const connected = await browser.connect(transportInput, endpoint)
     if (connected) {
       hasConnectedRef.current = true
-      setEndpointInput(endpoint.trim())
+      setEndpointInputs((current) => ({
+        ...current,
+        [transportInput]: endpoint.trim(),
+      }))
       setDialogOpen(false)
       setDialogMode('reconnect')
     }
   }
 
   const handleConnectionClick = () => {
-    setEndpointInput(browser.endpoint || endpointInput)
+    const nextTransport = browser.transport ?? transportInput
+    setTransportInput(nextTransport)
+    if (browser.endpoint) {
+      setEndpointInputs((current) => ({
+        ...current,
+        [nextTransport]: browser.endpoint,
+      }))
+    }
     setDialogMode(hasConnectedRef.current ? 'reconnect' : 'initial')
     setDialogOpen(true)
+  }
+
+  const handleEndpointChange = (endpoint: string) => {
+    setEndpointInputs((current) => ({ ...current, [transportInput]: endpoint }))
   }
 
   const handleNavigate = async (input: string) => {
@@ -140,11 +164,13 @@ export function App() {
 
       <ConnectionDialog
         open={dialogOpen}
-        endpoint={endpointInput}
+        transport={transportInput}
+        endpoint={endpointInputs[transportInput]}
         connecting={browser.connectionState === 'connecting'}
         error={browser.connectionError}
         mode={dialogMode}
-        onEndpointChange={setEndpointInput}
+        onTransportChange={setTransportInput}
+        onEndpointChange={handleEndpointChange}
         onConnect={(endpoint) => void handleConnect(endpoint)}
         onCancel={
           dialogMode === 'reconnect' && browser.connectionState === 'connected'

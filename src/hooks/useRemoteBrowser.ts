@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react'
 import {
-  BrowserOsClient,
   McpCallError,
   type ConnectionState,
   type McpServerInfo,
@@ -12,6 +11,13 @@ import {
   type ScrollDirection,
   type ViewportMetrics,
 } from '../lib/browseros'
+import {
+  createRemoteBrowserClient,
+  normalizeRemoteEndpoint,
+  transportLabel,
+  type RemoteBrowserClient,
+  type RemoteBrowserTransport,
+} from '../lib/remote'
 import {
   base64ToBlob,
   waitForImageDecode,
@@ -44,7 +50,7 @@ export interface DisplayFrame {
 }
 
 interface AppliedViewport {
-  client: BrowserOsClient
+  client: RemoteBrowserClient
   width: number
   height: number
   deviceScaleFactor: number
@@ -63,12 +69,13 @@ interface ClientEnvironmentSnapshot {
 }
 
 interface AppliedClientEnvironment {
-  client: BrowserOsClient
+  client: RemoteBrowserClient
   key: string
 }
 
 interface RemoteBrowserState {
   connectionState: ConnectionState
+  transport: RemoteBrowserTransport | null
   endpoint: string
   serverInfo: McpServerInfo | null
   connectionError: string | null
@@ -84,15 +91,21 @@ interface RemoteBrowserState {
 }
 
 type StateAction =
-  | { type: 'connecting'; endpoint: string }
+  | { type: 'connecting'; endpoint: string; transport: RemoteBrowserTransport }
   | {
       type: 'connected'
       endpoint: string
+      transport: RemoteBrowserTransport
       serverInfo: McpServerInfo
       tabs: RemoteTab[]
       activePageId: number | null
     }
-  | { type: 'connectionError'; endpoint: string; error: string }
+  | {
+      type: 'connectionError'
+      endpoint: string
+      transport: RemoteBrowserTransport
+      error: string
+    }
   | { type: 'disconnected' }
   | { type: 'syncingTabs'; value: boolean }
   | { type: 'tabs'; tabs: RemoteTab[] }
@@ -110,6 +123,7 @@ type StateAction =
 
 const initialState: RemoteBrowserState = {
   connectionState: 'disconnected',
+  transport: null,
   endpoint: '',
   serverInfo: null,
   connectionError: null,
@@ -133,6 +147,7 @@ function reducer(
       return {
         ...initialState,
         connectionState: 'connecting',
+        transport: action.transport,
         endpoint: action.endpoint,
         viewportPhase: 'loading',
       }
@@ -140,6 +155,7 @@ function reducer(
       return {
         ...state,
         connectionState: 'connected',
+        transport: action.transport,
         endpoint: action.endpoint,
         serverInfo: action.serverInfo,
         connectionError: null,
@@ -152,6 +168,7 @@ function reducer(
       return {
         ...initialState,
         connectionState: 'error',
+        transport: action.transport,
         endpoint: action.endpoint,
         connectionError: action.error,
         viewportPhase: 'disconnected',
@@ -204,7 +221,10 @@ function reducer(
 
 export interface RemoteBrowserController extends RemoteBrowserState {
   activeTab: RemoteTab | null
-  connect: (endpoint: string) => Promise<boolean>
+  connect: (
+    transport: RemoteBrowserTransport,
+    endpoint: string,
+  ) => Promise<boolean>
   disconnect: () => void
   refreshTabs: () => Promise<RemoteTab[]>
   selectTab: (pageId: number) => Promise<void>
@@ -224,7 +244,12 @@ export interface RemoteBrowserController extends RemoteBrowserState {
   pressKey: (key: string) => void
 }
 
-function describeError(error: unknown, endpoint?: string): string {
+function describeError(
+  error: unknown,
+  endpoint?: string,
+  transport?: RemoteBrowserTransport | null,
+): string {
+  const name = transportLabel(transport)
   if (error instanceof McpCallError) {
     const body = typeof error.data === 'string' ? error.data : ''
     if (
@@ -232,34 +257,27 @@ function describeError(error: unknown, endpoint?: string): string {
       body.includes('FORBIDDEN_ORIGIN') ||
       body.includes('Origin not allowed')
     ) {
-      return `BrowserOS 拒绝了当前页面来源。请用 BROWSEROS_TRUSTED_ORIGINS=${window.location.origin} 启动 BrowserOS 后重试。`
+      return transport === 'cdp'
+        ? `CDP 拒绝了当前页面来源。请用 --remote-allow-origins=${window.location.origin} 启动浏览器后重试。`
+        : `BrowserOS 拒绝了当前页面来源。请用 BROWSEROS_TRUSTED_ORIGINS=${window.location.origin} 启动 BrowserOS 后重试。`
     }
     if (error.code === 'MISSING_TOOLS') return error.message
-    if (error.kind === 'timeout') return '连接 BrowserOS 超时，请检查 MCP 地址和网络。'
+    if (error.kind === 'timeout') {
+      return transport === 'cdp'
+        ? '连接 CDP 超时，请检查调试地址和网络。'
+        : '连接 BrowserOS 超时，请检查 MCP 地址和网络。'
+    }
     if (error.kind === 'transport') {
+      if (transport === 'cdp') {
+        // The CDP client already produces actionable handshake/CORS messages.
+        return error.message || `无法访问 ${endpoint ?? 'CDP 调试地址'}。请确认地址可达，且浏览器已允许当前页面来源。`
+      }
       return `无法访问 ${endpoint ?? 'BrowserOS MCP'}。请确认服务可达，并已将 ${window.location.origin} 加入 BROWSEROS_TRUSTED_ORIGINS。`
     }
-    if (error.kind === 'aborted') return 'BrowserOS 请求已取消。'
+    if (error.kind === 'aborted') return `${name} 请求已取消。`
     return error.message
   }
-  return error instanceof Error ? error.message : 'BrowserOS 操作失败'
-}
-
-function normalizedEndpoint(input: string): string {
-  const value = input.trim()
-  let endpoint: URL
-  try {
-    endpoint = new URL(value)
-  } catch {
-    throw new Error('请输入完整的 HTTP(S) MCP 地址。')
-  }
-  if (endpoint.protocol !== 'http:' && endpoint.protocol !== 'https:') {
-    throw new Error('MCP 地址只支持 HTTP 或 HTTPS。')
-  }
-  if (window.location.protocol === 'https:' && endpoint.protocol === 'http:') {
-    throw new Error('HTTPS 页面不能连接 HTTP MCP，请为 BrowserOS MCP 配置 HTTPS。')
-  }
-  return endpoint.href
+  return error instanceof Error ? error.message : `${name} 操作失败`
 }
 
 function choosePageId(tabs: RemoteTab[], preferred?: number | null): number | null {
@@ -270,7 +288,7 @@ function choosePageId(tabs: RemoteTab[], preferred?: number | null): number | nu
 export function useRemoteBrowser(): RemoteBrowserController {
   const [state, reactDispatch] = useReducer(reducer, initialState)
   const stateRef = useRef(state)
-  const clientRef = useRef<BrowserOsClient | null>(null)
+  const clientRef = useRef<RemoteBrowserClient | null>(null)
   const lifecycleRef = useRef(0)
   const captureLifecycleRef = useRef(0)
   const frameGenerationRef = useRef(0)
@@ -313,6 +331,12 @@ export function useRemoteBrowser(): RemoteBrowserController {
     stateRef.current = reducer(stateRef.current, action)
     reactDispatch(action)
   }, [])
+
+  const describe = useCallback(
+    (error: unknown, endpoint?: string) =>
+      describeError(error, endpoint, stateRef.current.transport),
+    [],
+  )
 
   const clearFrameCache = useCallback(() => {
     frameCacheRef.current?.clear()
@@ -437,7 +461,7 @@ export function useRemoteBrowser(): RemoteBrowserController {
           lifecycle === lifecycleRef.current &&
           !(error instanceof McpCallError && error.kind === 'aborted')
         ) {
-          send({ type: 'frameFailed', error: describeError(error) })
+          send({ type: 'frameFailed', error: describe(error) })
         }
         return stateRef.current.tabs
       } finally {
@@ -497,13 +521,13 @@ export function useRemoteBrowser(): RemoteBrowserController {
   )
 
   const ensureClientEnvironment = useCallback(
-    (client: BrowserOsClient, pageId: number): Promise<void> => {
+    (client: RemoteBrowserClient, pageId: number): Promise<void> => {
       const previous = environmentQueuesRef.current.get(pageId)
         ?? Promise.resolve()
       const next = previous.catch(() => undefined).then(async () => {
         while (true) {
           if (client !== clientRef.current || client.state !== 'connected') {
-            throw new McpCallError('BrowserOS environment request was superseded', {
+            throw new McpCallError('Remote browser environment request was superseded', {
               kind: 'aborted',
               code: 'ABORTED',
             })
@@ -511,7 +535,7 @@ export function useRemoteBrowser(): RemoteBrowserController {
 
           const snapshot = await getClientEnvironment()
           if (client !== clientRef.current || client.state !== 'connected') {
-            throw new McpCallError('BrowserOS environment request was superseded', {
+            throw new McpCallError('Remote browser environment request was superseded', {
               kind: 'aborted',
               code: 'ABORTED',
             })
@@ -534,7 +558,7 @@ export function useRemoteBrowser(): RemoteBrowserController {
             continue
           }
           if (client !== clientRef.current || client.state !== 'connected') {
-            throw new McpCallError('BrowserOS environment request was superseded', {
+            throw new McpCallError('Remote browser environment request was superseded', {
               kind: 'aborted',
               code: 'ABORTED',
             })
@@ -566,7 +590,7 @@ export function useRemoteBrowser(): RemoteBrowserController {
   )
 
   const captureEncodedFrame = useCallback(
-    async (client: BrowserOsClient, pageId: number): Promise<CapturedFrame> => {
+    async (client: RemoteBrowserClient, pageId: number): Promise<CapturedFrame> => {
       await ensureClientEnvironment(client, pageId)
       const size = captureSizeRef.current
       const previous = appliedViewportsRef.current.get(pageId)
@@ -674,7 +698,7 @@ export function useRemoteBrowser(): RemoteBrowserController {
         stateRef.current.activePageId === pageId &&
         !(error instanceof McpCallError && error.kind === 'aborted')
       ) {
-        send({ type: 'frameFailed', error: describeError(error) })
+        send({ type: 'frameFailed', error: describe(error) })
       }
     } finally {
       if (
@@ -715,15 +739,19 @@ export function useRemoteBrowser(): RemoteBrowserController {
   }, [clearFrameCache, clearTimers, send])
 
   const connect = useCallback(
-    async (input: string): Promise<boolean> => {
+    async (
+      transport: RemoteBrowserTransport,
+      input: string,
+    ): Promise<boolean> => {
       let endpoint: string
       try {
-        endpoint = normalizedEndpoint(input)
+        endpoint = normalizeRemoteEndpoint(input, transport)
       } catch (error) {
         send({
           type: 'connectionError',
+          transport,
           endpoint: input.trim(),
-          error: describeError(error),
+          error: describeError(error, undefined, transport),
         })
         return false
       }
@@ -747,9 +775,9 @@ export function useRemoteBrowser(): RemoteBrowserController {
       environmentQueuesRef.current.clear()
       clearFrameCache()
       frameGenerationRef.current += 1
-      send({ type: 'connecting', endpoint })
+      send({ type: 'connecting', endpoint, transport })
 
-      const client = new BrowserOsClient()
+      const client = createRemoteBrowserClient(transport)
       clientRef.current = client
       try {
         const serverInfo = await client.connect(endpoint)
@@ -766,6 +794,7 @@ export function useRemoteBrowser(): RemoteBrowserController {
         send({
           type: 'connected',
           endpoint,
+          transport,
           serverInfo,
           tabs,
           activePageId,
@@ -778,8 +807,9 @@ export function useRemoteBrowser(): RemoteBrowserController {
         clientRef.current = null
         send({
           type: 'connectionError',
+          transport,
           endpoint,
-          error: describeError(error, endpoint),
+          error: describeError(error, endpoint, transport),
         })
         return false
       }
@@ -788,12 +818,12 @@ export function useRemoteBrowser(): RemoteBrowserController {
   )
 
   const enqueuePageAction = useCallback(
-    (pageId: number, action: (client: BrowserOsClient) => Promise<void>) => {
+    (pageId: number, action: (client: RemoteBrowserClient) => Promise<void>) => {
       const previous = pageQueuesRef.current.get(pageId) ?? Promise.resolve()
       const next = previous.catch(() => undefined).then(async () => {
         const client = clientRef.current
         if (!client || client.state !== 'connected') {
-          throw new McpCallError('BrowserOS MCP is not connected', {
+          throw new McpCallError('Remote browser is not connected', {
             kind: 'connection',
           })
         }
@@ -825,7 +855,7 @@ export function useRemoteBrowser(): RemoteBrowserController {
         if (selection !== tabSelectionRef.current) return
         const client = clientRef.current
         if (!client || client.state !== 'connected') {
-          throw new McpCallError('BrowserOS MCP is not connected', {
+          throw new McpCallError('Remote browser is not connected', {
             kind: 'connection',
           })
         }
@@ -851,7 +881,7 @@ export function useRemoteBrowser(): RemoteBrowserController {
         scheduleCapture(true)
       } catch (error) {
         if (selection === tabSelectionRef.current) {
-          send({ type: 'frameFailed', error: describeError(error) })
+          send({ type: 'frameFailed', error: describe(error) })
         }
       }
     },
@@ -884,7 +914,7 @@ export function useRemoteBrowser(): RemoteBrowserController {
             client !== clientRef.current ||
             client.state !== 'connected'
           ) {
-            throw new McpCallError('BrowserOS MCP is not connected', {
+            throw new McpCallError('Remote browser is not connected', {
               kind: 'connection',
             })
           }
@@ -913,7 +943,7 @@ export function useRemoteBrowser(): RemoteBrowserController {
       scheduleCapture(true)
     } catch (error) {
       if (lifecycle === lifecycleRef.current) {
-        send({ type: 'frameFailed', error: describeError(error) })
+        send({ type: 'frameFailed', error: describe(error) })
       }
     } finally {
       if (lifecycle === lifecycleRef.current) {
@@ -951,7 +981,7 @@ export function useRemoteBrowser(): RemoteBrowserController {
         retainFrameCache(tabs)
         scheduleCapture(true)
       } catch (error) {
-        send({ type: 'frameFailed', error: describeError(error) })
+        send({ type: 'frameFailed', error: describe(error) })
       } finally {
         send({ type: 'closing', pageId, value: false })
       }
@@ -993,7 +1023,7 @@ export function useRemoteBrowser(): RemoteBrowserController {
         ) {
           return
         }
-        send({ type: 'frameFailed', error: describeError(error) })
+        send({ type: 'frameFailed', error: describe(error) })
         throw error
       } finally {
         if (
@@ -1009,14 +1039,14 @@ export function useRemoteBrowser(): RemoteBrowserController {
 
   const runViewportAction = useCallback(
     (
-      action: (client: BrowserOsClient, pageId: number) => Promise<void>,
+      action: (client: RemoteBrowserClient, pageId: number) => Promise<void>,
       immediate = true,
     ) => {
       const pageId = stateRef.current.activePageId
       if (pageId === null) return
       void enqueuePageAction(pageId, (client) => action(client, pageId)).then(
         () => scheduleCapture(immediate),
-        (error) => send({ type: 'frameFailed', error: describeError(error) }),
+        (error) => send({ type: 'frameFailed', error: describe(error) }),
       )
     },
     [enqueuePageAction, scheduleCapture, send],
@@ -1047,7 +1077,7 @@ export function useRemoteBrowser(): RemoteBrowserController {
 
       void flush().then(
         () => scheduleCapture(false),
-        (error) => send({ type: 'frameFailed', error: describeError(error) }),
+        (error) => send({ type: 'frameFailed', error: describe(error) }),
       ).finally(() => hoverScheduledRef.current.delete(pageId))
     },
     [enqueuePageAction, scheduleCapture, send],

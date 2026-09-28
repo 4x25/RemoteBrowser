@@ -332,6 +332,25 @@ const server = createServer((request, response) => {
     json(response, 200, events, origin)
     return
   }
+  if (request.url.startsWith('/page')) {
+    const body = `<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8" /><title>CDP Target</title></head>
+  <body style="margin:0">
+    <button id="button" style="position:absolute;left:0;top:0;width:220px;height:110px" onclick="document.title = 'CDP Clicked'">Click</button>
+    <input id="field" aria-label="field" style="position:absolute;left:0;top:140px;width:240px;height:44px" />
+    <div style="height:3200px"></div>
+  </body>
+</html>
+`
+    response.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Content-Length': Buffer.byteLength(body),
+      'Cache-Control': 'no-store',
+    })
+    response.end(body)
+    return
+  }
   if (request.url === '/reset' && request.method === 'POST') {
     nextPageId = 102
     events = []

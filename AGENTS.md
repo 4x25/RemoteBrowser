@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This is a Vite React and TypeScript single-page application. Entry points are `src/main.tsx` and `src/App.tsx`. Reusable UI lives in `src/components/`, viewport behavior in `src/features/viewport/`, and orchestration hooks in `src/hooks/`. BrowserOS JSON-RPC code is under `src/lib/browseros/`; input mapping and scheduling utilities are under `src/lib/interaction/`. Global styles are in `src/styles.css`.
+This is a Vite React and TypeScript single-page application. Entry points are `src/main.tsx` and `src/App.tsx`. Reusable UI lives in `src/components/`, viewport behavior in `src/features/viewport/`, and orchestration hooks in `src/hooks/`. BrowserOS JSON-RPC code is under `src/lib/browseros/` and Chrome DevTools Protocol code under `src/lib/cdp/`; `src/lib/remote/` holds the transport-neutral client contract and endpoint validation shared by both. Input mapping and scheduling utilities are under `src/lib/interaction/`. Global styles are in `src/styles.css`.
 
 Tests are colocated with source files as `*.test.ts` or `*.test.tsx`. Playwright scenarios and the mock MCP server live in `e2e/`. Do not commit generated `dist/` output. Pages deployment is defined in `.github/workflows/deploy-pages.yml`.
 
@@ -24,7 +24,7 @@ Match existing TypeScript: two-space indentation, single quotes, no semicolons, 
 
 ## Testing Guidelines
 
-Use Vitest, React Testing Library, and `jest-dom` for unit/component behavior; use Playwright for complete browser flows. Name tests after the source unit and cover success, validation, timeout, and stale-response paths. No numeric coverage threshold is enforced, but every behavioral change should add or update focused tests. Real BrowserOS integration tests require `BROWSEROS_MCP_URL` and should remain optional.
+Use Vitest, React Testing Library, and `jest-dom` for unit/component behavior; use Playwright for complete browser flows. Name tests after the source unit and cover success, validation, timeout, and stale-response paths. No numeric coverage threshold is enforced, but every behavioral change should add or update focused tests. The CDP Playwright scenario launches its own Chromium with a remote debugging port, so it still needs `npx playwright install chromium`. Real integration tests require `BROWSEROS_MCP_URL` or `CDP_ENDPOINT` and should remain optional.
 
 ## Commit & Pull Request Guidelines
 
@@ -32,4 +32,4 @@ Follow the existing Conventional Commit form, for example `feat: add viewport co
 
 ## Security & Configuration
 
-Never persist the MCP URL or add credentials to source. BrowserOS must trust the exact frontend origin through `BROWSEROS_TRUSTED_ORIGINS`. Do not expose an unauthenticated MCP endpoint publicly, and remember that an HTTPS frontend requires an HTTPS MCP endpoint.
+Never persist the MCP or CDP URL or add credentials to source. BrowserOS must trust the exact frontend origin through `BROWSEROS_TRUSTED_ORIGINS`; Chrome must trust it through `--remote-allow-origins`. Do not expose an unauthenticated MCP endpoint or CDP debug port publicly, and remember that an HTTPS frontend requires an HTTPS/WSS endpoint. CDP debugger URLs can carry bearer tokens; keep them in memory only.
