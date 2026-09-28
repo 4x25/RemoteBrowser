@@ -87,6 +87,7 @@ class FakeSocket implements CdpSocket {
 
   close(): void {
     this.closed = true
+    this.emit('close')
   }
 
   emit(type: string, event: CdpSocketEvent = {}): void {
@@ -407,6 +408,15 @@ describe('CdpClient tabs', () => {
     })
     await client.listTabs()
     expect(commandsFor(socket, 'Target.attachToTarget')).toHaveLength(2)
+  })
+
+  it('deduplicates concurrent attach requests for the same target', async () => {
+    const browser = new FakeBrowser()
+    browser.targets = [pageTarget()]
+    const { client, socket } = await connectClient({ browser })
+
+    await Promise.all([client.listTabs(), client.listTabs()])
+    expect(commandsFor(socket, 'Target.attachToTarget')).toHaveLength(1)
   })
 
   it('creates, activates and closes tabs', async () => {
@@ -741,6 +751,107 @@ describe('CdpClient lifecycle', () => {
     await expect(client.listTabs()).rejects.toMatchObject({
       kind: 'connection',
     })
+  })
+
+  it('rejects in-flight commands when the transport closes', async () => {
+    const browser = new FakeBrowser()
+    browser.targets = [pageTarget()]
+    browser.stalled.add('Page.captureScreenshot')
+    const { client, socket } = await connectClient({
+      browser,
+      requestTimeoutMs: 5_000,
+    })
+    const [tab] = await client.listTabs()
+
+    const request = client.captureFrame(tab?.pageId ?? 0)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    socket.emit('close')
+    await expect(request).rejects.toMatchObject({
+      kind: 'transport',
+      code: 'CLOSED',
+    })
+    await expect(client.listTabs()).rejects.toMatchObject({
+      kind: 'connection',
+    })
+  })
+
+  it('reconnects on the same client without stale socket interference', async () => {
+    const browser = new FakeBrowser()
+    browser.targets = [pageTarget()]
+    const sockets: FakeSocket[] = []
+    const client = new CdpClient({
+      requestTimeoutMs: 500,
+      webSocketFactory: (url) => {
+        const socket = new FakeSocket(url, browser)
+        sockets.push(socket)
+        return socket
+      },
+    })
+
+    const first = client.connect('ws://127.0.0.1:9222/devtools/browser/one')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    sockets[0]?.emit('open')
+    await first
+
+    const second = client.connect('ws://127.0.0.1:9222/devtools/browser/two')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(sockets[0]?.closed).toBe(true)
+    sockets[1]?.emit('open')
+    await second
+    expect(client.endpoint).toBe('ws://127.0.0.1:9222/devtools/browser/two')
+
+    // A late close from the replaced socket must not clear the live session.
+    sockets[0]?.emit('close')
+    await expect(client.listTabs()).resolves.toHaveLength(1)
+  })
+
+  it('keeps the newest connection when an older attempt resolves late', async () => {
+    const browser = new FakeBrowser()
+    browser.targets = [pageTarget()]
+    const sockets: FakeSocket[] = []
+    const client = new CdpClient({
+      requestTimeoutMs: 500,
+      webSocketFactory: (url) => {
+        const socket = new FakeSocket(url, browser)
+        sockets.push(socket)
+        return socket
+      },
+    })
+
+    const first = client.connect('ws://127.0.0.1:9222/devtools/browser/one')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const second = client.connect('ws://127.0.0.1:9222/devtools/browser/two')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    sockets[1]?.emit('open')
+    await second
+    expect(client.state).toBe('connected')
+
+    sockets[0]?.emit('open')
+    await expect(first).rejects.toMatchObject({ kind: 'aborted' })
+    expect(client.state).toBe('connected')
+    expect(client.endpoint).toBe('ws://127.0.0.1:9222/devtools/browser/two')
+    await expect(client.listTabs()).resolves.toHaveLength(1)
+  })
+
+  it('retries a failed screenshot once after reactivating the target', async () => {
+    const browser = new FakeBrowser()
+    browser.targets = [pageTarget()]
+    const { client, socket } = await connectClient({ browser })
+    const [tab] = await client.listTabs()
+    let attempts = 0
+    const original = browser.handle.bind(browser)
+    browser.handle = (command: SentCommand): unknown => {
+      if (command.method === 'Page.captureScreenshot') {
+        attempts += 1
+        if (attempts === 1) throw new Error('flaky screenshot')
+      }
+      return original(command)
+    }
+
+    const frame = await client.captureFrame(tab?.pageId ?? 0, { format: 'jpeg' })
+    expect(frame.mimeType).toBe('image/jpeg')
+    expect(commandsFor(socket, 'Page.captureScreenshot')).toHaveLength(2)
   })
 
   it('surfaces command failures as rpc errors', async () => {

@@ -167,7 +167,9 @@ export function App() {
         transport={transportInput}
         endpoint={endpointInputs[transportInput]}
         connecting={browser.connectionState === 'connecting'}
-        error={browser.connectionError}
+        error={
+          browser.transport === transportInput ? browser.connectionError : null
+        }
         mode={dialogMode}
         onTransportChange={setTransportInput}
         onEndpointChange={handleEndpointChange}

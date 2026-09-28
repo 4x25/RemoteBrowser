@@ -38,6 +38,13 @@ export function normalizeRemoteEndpoint(
     )
   }
 
+  if (endpoint.username || endpoint.password) {
+    throw new Error('连接地址不能包含用户名或密码。')
+  }
+  if (endpoint.hash) {
+    throw new Error('连接地址不能包含片段。')
+  }
+
   if (
     pageProtocol === 'https:' &&
     INSECURE_PROTOCOLS.has(endpoint.protocol)

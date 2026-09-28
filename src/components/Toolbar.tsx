@@ -37,6 +37,7 @@ export function Toolbar({
   const errorId = useId()
   const pageActionsDisabled = disabled || connectionStatus !== 'connected'
   const connectionLabel = connectionStatus === 'connected' ? '切换连接' : '连接'
+  const endpointLabel = endpoint ? displayEndpoint(endpoint) : null
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -108,7 +109,7 @@ export function Toolbar({
           type="button"
           aria-label={connectionLabel}
           disabled={connectionStatus === 'connecting'}
-          title={endpoint ? `${connectionLabel}：${endpoint}` : connectionLabel}
+          title={endpointLabel ? `${connectionLabel}：${endpointLabel}` : connectionLabel}
           onClick={onConnectionClick}
         >
           <span className="rb-browser-toolbar__connection-label">
@@ -124,6 +125,17 @@ export function Toolbar({
       </div>
     </div>
   )
+}
+
+/** Hides query strings so debugger bearer tokens never reach the DOM. */
+function displayEndpoint(endpoint: string): string {
+  try {
+    const url = new URL(endpoint)
+    const suffix = url.search || url.hash ? '…' : ''
+    return `${url.origin}${url.pathname}${suffix}`
+  } catch {
+    return endpoint
+  }
 }
 
 interface IconButtonProps {

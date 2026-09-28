@@ -229,6 +229,28 @@ describe("Toolbar", () => {
     expect(button.querySelector(".rb-browser-toolbar__connection-menu"))
       .toHaveAttribute("aria-hidden", "true");
   });
+
+  it("masks endpoint query strings in the connection tooltip", () => {
+    render(
+      <Toolbar
+        address=""
+        connectionStatus="connected"
+        endpoint="wss://example.test/devtools/browser/abc?token=secret"
+        onAddressChange={vi.fn()}
+        onNavigate={vi.fn()}
+        onBack={vi.fn()}
+        onForward={vi.fn()}
+        onRefresh={vi.fn()}
+        onConnectionClick={vi.fn()}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "切换连接" });
+    expect(button.getAttribute("title")).toBe(
+      "切换连接：wss://example.test/devtools/browser/abc…",
+    );
+    expect(button.getAttribute("title")).not.toContain("secret");
+  });
 });
 
 describe("ViewportStatus", () => {

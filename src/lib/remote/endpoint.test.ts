@@ -44,6 +44,21 @@ describe('normalizeRemoteEndpoint', () => {
     )
   })
 
+  it('rejects embedded credentials and fragments', () => {
+    expect(() =>
+      normalizeRemoteEndpoint(
+        'wss://user:pass@example.test/devtools/browser/x',
+        'cdp',
+      ),
+    ).toThrow(/用户名或密码/)
+    expect(() =>
+      normalizeRemoteEndpoint('https://user:pass@example.test/mcp', 'browseros'),
+    ).toThrow(/用户名或密码/)
+    expect(() =>
+      normalizeRemoteEndpoint('https://example.test/mcp#frag', 'browseros'),
+    ).toThrow(/片段/)
+  })
+
   it('blocks insecure addresses on HTTPS pages', () => {
     expect(() =>
       normalizeRemoteEndpoint('http://127.0.0.1:9000/mcp', 'browseros', 'https:'),

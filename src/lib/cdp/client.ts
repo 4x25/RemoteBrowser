@@ -376,7 +376,9 @@ export class CdpClient implements RemoteBrowserClient {
   private stateValue: ConnectionState = 'disconnected'
   private serverInfoValue: McpServerInfo | null = null
   private socket: CdpSocket | null = null
+  private closeListener: (() => void) | null = null
   private pending = new Map<number, PendingCommand>()
+  private sessionRequests = new Map<string, Promise<CdpSession>>()
   private sessionsByTarget = new Map<string, CdpSession>()
   private sessionsById = new Map<string, CdpSession>()
   private pageIdByTarget = new Map<string, number>()
@@ -411,42 +413,46 @@ export class CdpClient implements RemoteBrowserClient {
     endpoint: string,
     options: RequestOptions = {},
   ): Promise<McpServerInfo> {
-    let webSocketUrl: string
-    try {
-      webSocketUrl = await this.resolveWebSocketUrl(endpoint, options)
-    } catch (error) {
-      this.stateValue = 'error'
-      this.endpointValue = null
-      throw error
-    }
-
     this.lifecycleController.abort()
-    this.lifecycleController = new AbortController()
+    const lifecycle = new AbortController()
+    this.lifecycleController = lifecycle
     this.rejectAllPending(
       new McpCallError('CDP connection attempt was superseded', {
         kind: 'aborted',
         code: 'ABORTED',
       }),
     )
+    this.detachSocket()
     this.resetState()
-    this.endpointValue = webSocketUrl
+    this.endpointValue = null
+    this.serverInfoValue = null
     this.stateValue = 'connecting'
-    const lifecycle = this.lifecycleController
 
     const timeoutMs = options.timeoutMs ?? this.defaultTimeoutMs
     let socket: CdpSocket | null = null
     try {
+      const webSocketUrl = await this.resolveWebSocketUrl(endpoint, options)
+      if (this.lifecycleController !== lifecycle) {
+        throw new McpCallError('CDP connection attempt was superseded', {
+          kind: 'aborted',
+          code: 'ABORTED',
+        })
+      }
+      this.endpointValue = webSocketUrl
+
       socket = this.webSocketFactory(webSocketUrl)
       await openSocket(socket, timeoutMs)
-      if (lifecycle !== this.lifecycleController) {
+      if (this.lifecycleController !== lifecycle) {
         throw new McpCallError('CDP connection attempt was superseded', {
           kind: 'aborted',
           code: 'ABORTED',
         })
       }
       this.socket = socket
-      socket.addEventListener('message', this.handleMessage)
-      socket.addEventListener('close', this.handleClose)
+      const activeSocket: CdpSocket = socket
+      activeSocket.addEventListener('message', this.handleMessage)
+      this.closeListener = () => this.handleSocketClose(activeSocket)
+      activeSocket.addEventListener('close', this.closeListener)
 
       const info = await this.callCommand(
         'Browser.getVersion',
@@ -455,7 +461,7 @@ export class CdpClient implements RemoteBrowserClient {
         undefined,
         true,
       )
-      if (lifecycle !== this.lifecycleController) {
+      if (this.lifecycleController !== lifecycle) {
         throw new McpCallError('CDP connection attempt was superseded', {
           kind: 'aborted',
           code: 'ABORTED',
@@ -481,7 +487,7 @@ export class CdpClient implements RemoteBrowserClient {
           // The socket may already be closed.
         }
       }
-      if (this.socket === socket) this.socket = null
+      if (this.socket === socket) this.detachSocket()
       if (lifecycle === this.lifecycleController) {
         this.stateValue = 'error'
         this.endpointValue = null
@@ -503,12 +509,7 @@ export class CdpClient implements RemoteBrowserClient {
         code: 'ABORTED',
       }),
     )
-    try {
-      this.socket?.close()
-    } catch {
-      // Ignore sockets that already closed themselves.
-    }
-    this.socket = null
+    this.detachSocket()
     this.endpointValue = null
     this.serverInfoValue = null
     this.resetState()
@@ -834,6 +835,8 @@ export class CdpClient implements RemoteBrowserClient {
     pageId: number,
     options: CaptureFrameOptions = {},
   ): Promise<RemoteFrame> {
+    // `width`/`height` describe the frame the caller sized the remote viewport
+    // to with `setViewport` (the orchestration hook always does this first).
     this.assertPage(pageId)
     const width = options.width ?? DEFAULT_CAPTURE_WIDTH
     const height = options.height ?? DEFAULT_CAPTURE_HEIGHT
@@ -859,11 +862,21 @@ export class CdpClient implements RemoteBrowserClient {
     try {
       data = await this.captureScreenshot(session, format, quality, options)
     } catch (error) {
-      if (error instanceof McpCallError && error.kind === 'aborted') throw error
+      if (
+        error instanceof McpCallError &&
+        (error.kind === 'aborted' ||
+          error.kind === 'connection' ||
+          error.kind === 'transport')
+      ) {
+        // Retrying cannot help when the connection itself is gone.
+        throw error
+      }
       // Hidden or throttled pages refuse to produce a frame; bring the target
-      // forward and retry once before surfacing the failure.
+      // forward and retry once before surfacing the failure. The session may
+      // have detached with the tab, so resolve it again first.
       await this.activateTab(pageId, options)
-      data = await this.captureScreenshot(session, format, quality, options)
+      const retrySession = await this.ensureSession(targetId, options)
+      data = await this.captureScreenshot(retrySession, format, quality, options)
     }
 
     return {
@@ -1140,16 +1153,41 @@ export class CdpClient implements RemoteBrowserClient {
     const session = this.sessionsById.get(sessionId)
     if (!session) return
     this.sessionsById.delete(sessionId)
-    this.sessionsByTarget.delete(session.targetId)
+    if (this.sessionsByTarget.get(session.targetId)?.sessionId === sessionId) {
+      this.sessionsByTarget.delete(session.targetId)
+    }
   }
 
-  private async ensureSession(
+  private ensureSession(
     targetId: string,
     options: RequestOptions,
   ): Promise<CdpSession> {
     const existing = this.sessionsByTarget.get(targetId)
-    if (existing) return existing
+    if (existing) return Promise.resolve(existing)
+    const inFlight = this.sessionRequests.get(targetId)
+    if (inFlight) return inFlight
 
+    const request = this.attachSession(targetId, options)
+    this.sessionRequests.set(targetId, request)
+    void request.then(
+      () => {
+        if (this.sessionRequests.get(targetId) === request) {
+          this.sessionRequests.delete(targetId)
+        }
+      },
+      () => {
+        if (this.sessionRequests.get(targetId) === request) {
+          this.sessionRequests.delete(targetId)
+        }
+      },
+    )
+    return request
+  }
+
+  private async attachSession(
+    targetId: string,
+    options: RequestOptions,
+  ): Promise<CdpSession> {
     const result = await this.callCommand(
       'Target.attachToTarget',
       { targetId, flatten: true },
@@ -1593,6 +1631,7 @@ export class CdpClient implements RemoteBrowserClient {
   }
 
   private resetState(): void {
+    this.sessionRequests.clear()
     this.sessionsByTarget.clear()
     this.sessionsById.clear()
     this.pageIdByTarget.clear()
@@ -1682,13 +1721,33 @@ export class CdpClient implements RemoteBrowserClient {
     }
   }
 
-  private handleClose = (): void => {
-    if (!this.socket) return
+  private handleSocketClose(socket: CdpSocket): void {
+    if (this.socket !== socket) return
     this.socket = null
+    this.closeListener = null
     this.rejectAllPending(new McpCallError('CDP 连接已断开，请重新连接。', {
       kind: 'transport',
       code: 'CLOSED',
     }))
+  }
+
+  private detachSocket(): void {
+    const socket = this.socket
+    if (!socket) {
+      this.closeListener = null
+      return
+    }
+    socket.removeEventListener?.('message', this.handleMessage)
+    if (this.closeListener) {
+      socket.removeEventListener?.('close', this.closeListener)
+    }
+    this.socket = null
+    this.closeListener = null
+    try {
+      socket.close()
+    } catch {
+      // Ignore sockets that already closed themselves.
+    }
   }
 }
 
